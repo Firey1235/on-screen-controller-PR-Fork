@@ -7,7 +7,7 @@ import { getModalBackground, Modal, showMessage, showModal } from "./component/m
 import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input.js";
 import { getLocalStreamSettings, Settings, TransportType } from "./component/settings_menu.js";
-import { SelectComponent } from "./component/input.js";
+import { InputComponent, SelectComponent } from "./component/input.js";
 import { DetailedRole, LogMessageType, StreamCapabilities, StreamKeys, StreamPermissions } from "./api_bindings.js";
 import { KeyboardModeEvent, KeyboardModeWillChangeEvent, ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
@@ -1445,6 +1445,46 @@ class ViewerSidebar implements Component, Sidebar {
         })
         this.touchMode.addChangeListener(this.onTouchModeChange.bind(this))
         this.touchMode.mount(this.div)
+
+        // -- Virtual Gamepad Configuration --
+        const layoutSelect = new SelectComponent("vpad-layout", [
+            { value: "standard", name: "Standard Layout" },
+            { value: "fighting", name: "Fighting Layout" }
+        ], { displayName: "Gamepad Layout", preSelectedOption: "standard" });
+        layoutSelect.addChangeListener(() => {
+            const val = layoutSelect.getValue();
+            const overlay = document.getElementById('controller-overlay');
+            if (overlay) {
+                overlay.className = "prevent-start-transition"; // reset
+                if (window.vGamepad?.connected) {
+                    overlay.classList.add('active');
+                }
+                if (val === "fighting") overlay.classList.add("layout-fighting");
+            }
+        });
+        layoutSelect.mount(this.div);
+
+        const opacitySlider = new InputComponent("vpad-opacity", "number", "Gamepad Opacity", {
+            numberSlider: { range_min: 0.1, range_max: 1.0 },
+            step: "0.1",
+            value: "1.0"
+        });
+        opacitySlider.addChangeListener(() => {
+            const overlay = document.getElementById('controller-overlay');
+            if (overlay) overlay.style.setProperty('--vpad-opacity', opacitySlider.getValue());
+        });
+        opacitySlider.mount(this.div);
+
+        const scaleSlider = new InputComponent("vpad-scale", "number", "Gamepad Scale", {
+            numberSlider: { range_min: 0.5, range_max: 1.5 },
+            step: "0.1",
+            value: "1.0"
+        });
+        scaleSlider.addChangeListener(() => {
+            const overlay = document.getElementById('controller-overlay');
+            if (overlay) overlay.style.setProperty('--vpad-scale', scaleSlider.getValue());
+        });
+        scaleSlider.mount(this.div);
     }
 
     onCapabilitiesChange(capabilities: StreamCapabilities) {
