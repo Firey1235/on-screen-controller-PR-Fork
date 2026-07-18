@@ -608,20 +608,22 @@
             }
         };
 
-        const sizeSlider = document.getElementById('edit-size-slider');
-        if (sizeSlider) {
-            sizeSlider.addEventListener('input', (e) => {
-                if (selectedElement) {
-                    selectedElement.style.transform = `scale(${e.target.value})`;
-                }
-            });
-        }
-        const saveBtn = document.getElementById('edit-save-btn');
-        if (saveBtn) {
-            saveBtn.addEventListener('click', () => {
-                window.toggleGamepadEditMode(false);
-            });
-        }
+        window.addEventListener('DOMContentLoaded', () => {
+            const sizeSlider = document.getElementById('edit-size-slider');
+            if (sizeSlider) {
+                sizeSlider.addEventListener('input', (e) => {
+                    if (selectedElement) {
+                        selectedElement.style.transform = `scale(${e.target.value})`;
+                    }
+                });
+            }
+            const saveBtn = document.getElementById('edit-save-btn');
+            if (saveBtn) {
+                saveBtn.addEventListener('click', () => {
+                    window.toggleGamepadEditMode(false);
+                });
+            }
+        });
         
     </script>
 
