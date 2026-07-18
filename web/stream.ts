@@ -1447,22 +1447,23 @@ class ViewerSidebar implements Component, Sidebar {
         this.touchMode.mount(this.div)
 
         // -- Virtual Gamepad Configuration --
-        const layoutSelect = new SelectComponent("vpad-layout", [
-            { value: "standard", name: "Standard Layout" },
-            { value: "fighting", name: "Fighting Layout" }
-        ], { displayName: "Gamepad Layout", preSelectedOption: "standard" });
-        layoutSelect.addChangeListener(() => {
-            const val = layoutSelect.getValue();
-            const overlay = document.getElementById('controller-overlay');
-            if (overlay) {
-                overlay.className = "prevent-start-transition"; // reset
-                if (window.vGamepad?.connected) {
-                    overlay.classList.add('active');
-                }
-                if (val === "fighting") overlay.classList.add("layout-fighting");
+        const editBtn = document.createElement("button");
+        editBtn.innerText = "Edit Gamepad Layout";
+        editBtn.style.padding = "8px 16px";
+        editBtn.style.background = "#4CAF50";
+        editBtn.style.color = "white";
+        editBtn.style.border = "none";
+        editBtn.style.borderRadius = "4px";
+        editBtn.style.marginTop = "15px";
+        editBtn.style.cursor = "pointer";
+        editBtn.style.fontWeight = "bold";
+        editBtn.style.width = "100%";
+        editBtn.onclick = () => {
+            if ((window as any).toggleGamepadEditMode) {
+                (window as any).toggleGamepadEditMode(true);
             }
-        });
-        layoutSelect.mount(this.div);
+        };
+        this.div.appendChild(editBtn);
 
         const opacitySlider = new InputComponent("vpad-opacity", "number", "Gamepad Opacity", {
             numberSlider: { range_min: 0.1, range_max: 1.0 },
@@ -1474,17 +1475,6 @@ class ViewerSidebar implements Component, Sidebar {
             if (overlay) overlay.style.setProperty('--vpad-opacity', opacitySlider.getValue());
         });
         opacitySlider.mount(this.div);
-
-        const scaleSlider = new InputComponent("vpad-scale", "number", "Gamepad Scale", {
-            numberSlider: { range_min: 0.5, range_max: 1.5 },
-            step: "0.1",
-            value: "1.0"
-        });
-        scaleSlider.addChangeListener(() => {
-            const overlay = document.getElementById('controller-overlay');
-            if (overlay) overlay.style.setProperty('--vpad-scale', scaleSlider.getValue());
-        });
-        scaleSlider.mount(this.div);
     }
 
     onCapabilitiesChange(capabilities: StreamCapabilities) {
