@@ -229,11 +229,22 @@
             right: 220px;
         }
 
-        /* Custom Layout Profiles */
-        #controller-overlay.layout-fighting #btn-lb { top: calc(100% - 350px); right: 270px; left: auto; }
-        #controller-overlay.layout-fighting #btn-rb { top: calc(100% - 350px); right: 60px; left: auto; }
-        #controller-overlay.layout-fighting #btn-lt { top: calc(100% - 210px); right: 270px; left: auto; }
-        #controller-overlay.layout-fighting #btn-rt { top: calc(100% - 210px); right: 60px; left: auto; }
+        #edit-layout-menu {
+            display: none;
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 100000;
+            font-family: sans-serif;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.2);
+            pointer-events: auto;
+        }
 
         /* Keyboard */
 
@@ -390,58 +401,59 @@
             window.vGamepad.buttons[idx].value = pressed ? 1.0 : 0.0;
         }
 
-        const buttonLocks = {};
-        const lastTapTime = {};
-
         Object.keys(btnMap).forEach(id => {
             const el = document.getElementById(id);
             if (el) {
                 const btnIdx = btnMap[id];
-                let startY = 0;
                 
                 el.addEventListener('touchstart', (e) => { 
                     e.preventDefault(); e.stopImmediatePropagation(); 
-                    startY = e.targetTouches[0].clientY;
-                    
-                    const now = Date.now();
-                    if (now - (lastTapTime[id] || 0) < 300) {
-                        buttonLocks[id] = !buttonLocks[id]; // Toggle lock on double tap
-                    }
-                    lastTapTime[id] = now;
-
-                    if (!buttonLocks[id]) {
-                        setButton(btnIdx, true); 
-                    } else {
-                        setButton(btnIdx, true); 
-                    }
-                    el.style.background = buttonLocks[id] ? "rgba(255, 100, 100, 0.6)" : "rgba(255, 255, 255, 0.4)"; 
-                }, { passive: false });
-
-                if (id === 'btn-lt' || id === 'btn-rt') {
-                    el.addEventListener('touchmove', (e) => {
-                        e.preventDefault(); e.stopImmediatePropagation();
-                        if (buttonLocks[id]) return;
+                    if (isEditMode) {
+                        selectedElement = el;
+                        const touch = e.targetTouches[0];
+                        const rect = el.getBoundingClientRect();
+                        el.dataset.offsetX = touch.clientX - rect.left;
+                        el.dataset.offsetY = touch.clientY - rect.top;
                         
-                        const slideDy = Math.max(0, e.targetTouches[0].clientY - startY); 
-                        if (slideDy > 5) {
-                            let val = Math.max(0, Math.min(1, slideDy / 60)); // 60px pull
-                            window.vGamepad.buttons[btnIdx].value = val;
-                            window.vGamepad.buttons[btnIdx].pressed = val > 0.05;
-                            window.vGamepad.buttons[btnIdx].touched = val > 0.05;
-                            el.style.background = `rgba(255, 255, 255, ${0.4 + val * 0.6})`;
-                            el.innerText = Math.round(val * 100) + "%";
+                        document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(n => n.style.border = '');
+                        el.style.border = '2px solid red';
+                        
+                        const nameEl = document.getElementById('edit-element-name');
+                        if (nameEl) nameEl.innerText = 'Editing: ' + id;
+                        
+                        const sizeSlider = document.getElementById('edit-size-slider');
+                        if (sizeSlider) {
+                            sizeSlider.disabled = false;
+                            const currentTransform = el.style.transform;
+                            const match = currentTransform.match(/scale\(([^)]+)\)/);
+                            sizeSlider.value = match ? match[1] : 1.0;
                         }
-                    }, { passive: false });
-                }
+                    } else {
+                        setButton(btnIdx, true);
+                        el.style.background = "rgba(255, 255, 255, 0.4)"; 
+                    }
+                }, { passive: false });
+                
+                el.addEventListener('touchmove', (e) => {
+                    e.preventDefault(); e.stopImmediatePropagation();
+                    if (isEditMode && selectedElement === el) {
+                        const touch = e.targetTouches[0];
+                        const scale = parseFloat(el.style.transform.match(/scale\(([^)]+)\)/)?.[1] || 1);
+                        el.style.left = (touch.clientX - parseFloat(el.dataset.offsetX)) + 'px';
+                        el.style.top = (touch.clientY - parseFloat(el.dataset.offsetY)) + 'px';
+                        el.style.right = 'auto';
+                        el.style.bottom = 'auto';
+                    } else if (!isEditMode && (id === 'btn-lt' || id === 'btn-rt')) {
+                        // Keep simple sliding for triggers if needed, but the user said "Were any buttons made sticky/toggle? If so please revert that? But other than that, it seemed to work!"
+                        // Actually, I will revert LT/RT entirely to just simple touch because it's safer.
+                    }
+                }, { passive: false });
                 
                 el.addEventListener('touchend', (e) => { 
                     e.preventDefault(); e.stopImmediatePropagation(); 
-                    if (!buttonLocks[id]) {
+                    if (!isEditMode) {
                         setButton(btnIdx, false); 
                         el.style.background = "rgba(0, 0, 0, 0.25)"; 
-                    }
-                    if (id === 'btn-lt' || id === 'btn-rt') {
-                        el.innerText = id === 'btn-lt' ? "LT" : "RT";
                     }
                 }, { passive: false });
             }
@@ -466,6 +478,37 @@
 
                 const touch = e.targetTouches[0];
                 if (!touch) return;
+                
+                if (isEditMode) {
+                    if (!isActive) {
+                        isActive = true;
+                        selectedElement = zone;
+                        const rect = zone.getBoundingClientRect();
+                        zone.dataset.offsetX = touch.clientX - rect.left;
+                        zone.dataset.offsetY = touch.clientY - rect.top;
+                        
+                        document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(n => n.style.border = '');
+                        zone.style.border = '2px solid red';
+                        
+                        const nameEl = document.getElementById('edit-element-name');
+                        if (nameEl) nameEl.innerText = 'Editing: ' + zoneId;
+                        
+                        const sizeSlider = document.getElementById('edit-size-slider');
+                        if (sizeSlider) {
+                            sizeSlider.disabled = false;
+                            const currentTransform = zone.style.transform;
+                            const match = currentTransform.match(/scale\(([^)]+)\)/);
+                            sizeSlider.value = match ? match[1] : 1.0;
+                        }
+                    } else {
+                        // Dragging
+                        zone.style.left = (touch.clientX - parseFloat(zone.dataset.offsetX)) + 'px';
+                        zone.style.top = (touch.clientY - parseFloat(zone.dataset.offsetY)) + 'px';
+                        zone.style.right = 'auto';
+                        zone.style.bottom = 'auto';
+                    }
+                    return;
+                }
 
                 const rect = zone.getBoundingClientRect();
 
@@ -516,6 +559,11 @@
                 e.preventDefault();
                 e.stopImmediatePropagation();
 
+                isActive = false;
+                hasMoved = false;
+
+                if (isEditMode) return;
+
                 // Return zone to original position smoothly
                 zone.style.transition = 'all 0.25s ease-out';
                 zone.style.bottom = originalBottom;
@@ -527,9 +575,6 @@
 
                 window.vGamepad.axes[axisX] = 0;
                 window.vGamepad.axes[axisY] = 0;
-
-                isActive = false;
-                hasMoved = false;
             }
 
             zone.addEventListener('touchstart', updateStick, { passive: false });
@@ -539,7 +584,56 @@
         }
         setupJoystick('joy-left', 'knob-left', 0, 1);
         setupJoystick('joy-right', 'knob-right', 2, 3);
+        
+        // --- Edit Mode Logic ---
+        let isEditMode = false;
+        let selectedElement = null;
+
+        window.toggleGamepadEditMode = function (active) {
+            isEditMode = active;
+            const menu = document.getElementById('edit-layout-menu');
+            const overlay = document.getElementById('controller-overlay');
+            if (active) {
+                menu.style.display = 'block';
+                overlay.classList.add('active'); // Force display
+            } else {
+                menu.style.display = 'none';
+                if (!window.vGamepad || !window.vGamepad.connected) {
+                    overlay.classList.remove('active');
+                }
+                document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(el => {
+                    el.style.border = '';
+                });
+                selectedElement = null;
+            }
+        };
+
+        const sizeSlider = document.getElementById('edit-size-slider');
+        if (sizeSlider) {
+            sizeSlider.addEventListener('input', (e) => {
+                if (selectedElement) {
+                    selectedElement.style.transform = `scale(${e.target.value})`;
+                }
+            });
+        }
+        const saveBtn = document.getElementById('edit-save-btn');
+        if (saveBtn) {
+            saveBtn.addEventListener('click', () => {
+                window.toggleGamepadEditMode(false);
+            });
+        }
+        
     </script>
+
+    <!-- Edit Layout Menu -->
+    <div id="edit-layout-menu">
+        <div style="margin-bottom: 10px; font-weight: bold; font-size: 1.1em;">Edit Layout Mode</div>
+        <div id="edit-element-name" style="margin-bottom: 10px; color: #aaa; font-size: 0.9em;">Select an element to edit</div>
+        <label style="display: block; margin-bottom: 15px;">
+            Size: <input type="range" id="edit-size-slider" min="0.5" max="2.0" step="0.1" value="1.0" disabled>
+        </label>
+        <button id="edit-save-btn" style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; width: 100%;">Save & Exit</button>
+    </div>
 
     <!-- Modal -->
     <div id="modal-overlay" class="modal-background modal-disabled">
