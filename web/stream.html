@@ -91,6 +91,15 @@
             transform-origin: center;
         }
 
+        .trigger-button {
+            background: linear-gradient(to bottom, rgba(255, 255, 255, 0.7) var(--trigger-value, 0%), rgba(0, 0, 0, 0.25) var(--trigger-value, 0%));
+            transition: background 0.08s ease-out;
+        }
+
+        .trigger-button.active {
+            border-color: rgba(255, 255, 255, 0.8);
+        }
+
         .btn-round {
             width: 60px;
             height: 60px;
@@ -244,6 +253,23 @@
             text-align: center;
             border: 1px solid rgba(255,255,255,0.2);
             pointer-events: auto;
+            touch-action: manipulation;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        #edit-layout-menu button,
+        #edit-layout-menu input {
+            touch-action: manipulation;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        #edit-layout-menu input[type="range"] {
+            touch-action: pan-x;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            user-select: none;
         }
 
         /* Keyboard */
@@ -303,9 +329,9 @@
     </style>
 
     <div id="controller-overlay">
-        <div id="btn-lt" class="vbtn btn-round">LT</div>
+        <div id="btn-lt" class="vbtn btn-round trigger-button">LT</div>
         <div id="btn-lb" class="vbtn btn-round">LB</div>
-        <div id="btn-rt" class="vbtn btn-round">RT</div>
+        <div id="btn-rt" class="vbtn btn-round trigger-button">RT</div>
         <div id="btn-rb" class="vbtn btn-round">RB</div>
         <div id="btn-select" class="vbtn btn-round">◀</div>
         <div id="btn-guide" class="vbtn btn-round">🎮</div>
@@ -395,32 +421,150 @@
         });
 
         const btnMap = { 'btn-a': 1, 'btn-b': 0, 'btn-x': 3, 'btn-y': 2, 'btn-lb': 4, 'btn-rb': 5, 'btn-lt': 6, 'btn-rt': 7, 'btn-select': 8, 'btn-start': 9, 'btn-l3': 10, 'btn-r3': 11, 'btn-up': 12, 'btn-down': 13, 'btn-left': 14, 'btn-right': 15, 'btn-guide': 16 };
+        const triggerButtons = new Set(['btn-lt', 'btn-rt']);
+        const triggerState = {
+            'btn-lt': { active: false, hasMoved: false },
+            'btn-rt': { active: false, hasMoved: false }
+        };
+        window.vpadConfig = window.vpadConfig || { analogTriggers: true, hapticsEnabled: true, motionEnabled: false };
+
+        let motionControlListening = false;
+        let motionControlPermissionRequested = false;
+        let motionControlLastUpdate = 0;
+
+        function shouldUseMotionControls() {
+            return window.vpadConfig?.motionEnabled !== false;
+        }
+
+        function setMotionControlsEnabled(enabled) {
+            window.vpadConfig = window.vpadConfig || {};
+            window.vpadConfig.motionEnabled = enabled;
+            if (!enabled) {
+                motionControlListening = false;
+                motionControlPermissionRequested = false;
+                window.removeEventListener('deviceorientation', handleMotionOrientation, true);
+                return;
+            }
+            requestMotionControlsPermission();
+        }
+
+        window.setMotionControlsEnabled = setMotionControlsEnabled;
+
+        function startMotionControls() {
+            if (motionControlListening || typeof window === 'undefined') return;
+            if (typeof window.DeviceOrientationEvent === 'undefined') return;
+
+            motionControlListening = true;
+            window.addEventListener('deviceorientation', handleMotionOrientation, true);
+        }
+
+        function requestMotionControlsPermission() {
+            if (!shouldUseMotionControls()) return;
+            if (motionControlPermissionRequested) return;
+            motionControlPermissionRequested = true;
+
+            if (typeof window.DeviceOrientationEvent === 'undefined') {
+                startMotionControls();
+                return;
+            }
+
+            if (typeof window.DeviceOrientationEvent.requestPermission === 'function') {
+                window.DeviceOrientationEvent.requestPermission().then((response) => {
+                    if (response === 'granted') {
+                        startMotionControls();
+                    }
+                }).catch(() => {
+                    startMotionControls();
+                });
+            } else {
+                startMotionControls();
+            }
+        }
+
+        function handleMotionOrientation(event) {
+            if (!shouldUseMotionControls() || isEditMode) return;
+            const input = window.app?.getStream?.()?.getInput?.();
+            if (!input) return;
+
+            const now = performance.now();
+            if (now - motionControlLastUpdate < 16) return;
+
+            const rawX = (event.gamma || 0) / 45;
+            const rawY = (event.beta || 0) / 45;
+            const deadzone = 0.08;
+            const sensitivity = 8;
+
+            const clampedX = Math.max(-1, Math.min(1, rawX));
+            const clampedY = Math.max(-1, Math.min(1, rawY));
+            const dx = Math.abs(clampedX) > deadzone ? clampedX * sensitivity : 0;
+            const dy = Math.abs(clampedY) > deadzone ? clampedY * sensitivity : 0;
+
+            if (dx !== 0 || dy !== 0) {
+                input.sendMouseMove(dx, dy);
+                motionControlLastUpdate = now;
+            }
+        }
+
         function setButton(idx, pressed) {
             window.vGamepad.buttons[idx].pressed = pressed;
             window.vGamepad.buttons[idx].touched = pressed;
             window.vGamepad.buttons[idx].value = pressed ? 1.0 : 0.0;
         }
 
+        function shouldUseAnalogTriggers() {
+            return window.vpadConfig?.analogTriggers !== false;
+        }
+
+        function shouldVibrate() {
+            return window.vpadConfig?.hapticsEnabled !== false;
+        }
+
+        function vibrateShort(duration = 10) {
+            if (shouldVibrate() && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+                navigator.vibrate(duration);
+            }
+        }
+
+        function setTriggerValue(idx, value) {
+            const isPressed = value > 0;
+            window.vGamepad.buttons[idx].pressed = isPressed;
+            window.vGamepad.buttons[idx].touched = isPressed;
+            window.vGamepad.buttons[idx].value = value;
+        }
+
+        function updateTriggerVisual(el, value) {
+            el.style.setProperty('--trigger-value', `${value * 100}%`);
+            el.classList.toggle('active', value > 0);
+        }
+
+        document.addEventListener('pointerdown', () => {
+            requestMotionControlsPermission();
+        }, { once: true, passive: true });
+
+        document.addEventListener('touchstart', () => {
+            requestMotionControlsPermission();
+        }, { once: true, passive: true });
+
         Object.keys(btnMap).forEach(id => {
             const el = document.getElementById(id);
             if (el) {
                 const btnIdx = btnMap[id];
-                
-                el.addEventListener('touchstart', (e) => { 
-                    e.preventDefault(); e.stopImmediatePropagation(); 
+
+                el.addEventListener('touchstart', (e) => {
+                    e.preventDefault(); e.stopImmediatePropagation();
+                    const touch = e.targetTouches[0];
                     if (isEditMode) {
                         selectedElement = el;
-                        const touch = e.targetTouches[0];
                         const rect = el.getBoundingClientRect();
                         el.dataset.offsetX = touch.clientX - rect.left;
                         el.dataset.offsetY = touch.clientY - rect.top;
-                        
+
                         document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(n => n.style.border = '');
                         el.style.border = '2px solid red';
-                        
+
                         const nameEl = document.getElementById('edit-element-name');
                         if (nameEl) nameEl.innerText = 'Editing: ' + id;
-                        
+
                         const sizeSlider = document.getElementById('edit-size-slider');
                         if (sizeSlider) {
                             sizeSlider.disabled = false;
@@ -428,12 +572,26 @@
                             const match = currentTransform.match(/scale\(([^)]+)\)/);
                             sizeSlider.value = match ? match[1] : 1.0;
                         }
+                    } else if (triggerButtons.has(id)) {
+                        const trigger = triggerState[id];
+                        trigger.active = true;
+                        trigger.hasMoved = false;
+                        trigger.startY = touch.clientY;
+                        if (shouldUseAnalogTriggers()) {
+                            setTriggerValue(btnIdx, 1.0);
+                            updateTriggerVisual(el, 1.0);
+                        } else {
+                            setTriggerValue(btnIdx, 1.0);
+                            updateTriggerVisual(el, 1.0);
+                        }
+                        vibrateShort(10);
                     } else {
                         setButton(btnIdx, true);
-                        el.style.background = "rgba(255, 255, 255, 0.4)"; 
+                        el.style.background = "rgba(255, 255, 255, 0.4)";
+                        vibrateShort(10);
                     }
                 }, { passive: false });
-                
+
                 el.addEventListener('touchmove', (e) => {
                     e.preventDefault(); e.stopImmediatePropagation();
                     if (isEditMode && selectedElement === el) {
@@ -443,17 +601,35 @@
                         el.style.top = (touch.clientY - parseFloat(el.dataset.offsetY)) + 'px';
                         el.style.right = 'auto';
                         el.style.bottom = 'auto';
-                    } else if (!isEditMode && (id === 'btn-lt' || id === 'btn-rt')) {
-                        // Keep simple sliding for triggers if needed, but the user said "Were any buttons made sticky/toggle? If so please revert that? But other than that, it seemed to work!"
-                        // Actually, I will revert LT/RT entirely to just simple touch because it's safer.
+                    } else if (!isEditMode && triggerButtons.has(id)) {
+                        const trigger = triggerState[id];
+                        if (!trigger.active) return;
+                        trigger.hasMoved = true;
+                        const touch = e.targetTouches[0];
+                        const rect = el.getBoundingClientRect();
+                        if (shouldUseAnalogTriggers()) {
+                            const value = Math.min(Math.max((touch.clientY - rect.top) / rect.height, 0), 1);
+                            setTriggerValue(btnIdx, value);
+                            updateTriggerVisual(el, value);
+                        } else {
+                            setTriggerValue(btnIdx, 1.0);
+                            updateTriggerVisual(el, 1.0);
+                        }
                     }
                 }, { passive: false });
-                
-                el.addEventListener('touchend', (e) => { 
-                    e.preventDefault(); e.stopImmediatePropagation(); 
-                    if (!isEditMode) {
-                        setButton(btnIdx, false); 
-                        el.style.background = "rgba(0, 0, 0, 0.25)"; 
+
+                el.addEventListener('touchend', (e) => {
+                    e.preventDefault(); e.stopImmediatePropagation();
+                    if (!isEditMode && triggerButtons.has(id)) {
+                        const trigger = triggerState[id];
+                        trigger.active = false;
+                        trigger.hasMoved = false;
+                        setTriggerValue(btnIdx, 0);
+                        updateTriggerVisual(el, 0);
+                        el.style.background = '';
+                    } else if (!isEditMode) {
+                        setButton(btnIdx, false);
+                        el.style.background = "rgba(0, 0, 0, 0.25)";
                     }
                 }, { passive: false });
             }
@@ -478,7 +654,7 @@
 
                 const touch = e.targetTouches[0];
                 if (!touch) return;
-                
+
                 if (isEditMode) {
                     if (!isActive) {
                         isActive = true;
@@ -486,13 +662,13 @@
                         const rect = zone.getBoundingClientRect();
                         zone.dataset.offsetX = touch.clientX - rect.left;
                         zone.dataset.offsetY = touch.clientY - rect.top;
-                        
+
                         document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(n => n.style.border = '');
                         zone.style.border = '2px solid red';
-                        
+
                         const nameEl = document.getElementById('edit-element-name');
                         if (nameEl) nameEl.innerText = 'Editing: ' + zoneId;
-                        
+
                         const sizeSlider = document.getElementById('edit-size-slider');
                         if (sizeSlider) {
                             sizeSlider.disabled = false;
@@ -584,7 +760,7 @@
         }
         setupJoystick('joy-left', 'knob-left', 0, 1);
         setupJoystick('joy-right', 'knob-right', 2, 3);
-        
+
         // --- Edit Mode Logic ---
         let isEditMode = false;
         let selectedElement = null;
@@ -608,6 +784,27 @@
             }
         };
 
+        function triggerSaveExit(event) {
+            if (event) {
+                if (event.type === 'mousedown' && event.button !== 0) return;
+                if (event.type === 'pointerdown' && event.pointerType === 'mouse' && event.button !== 0) return;
+                if (event.type === 'touchstart' && event.touches && event.touches.length > 1) return;
+                if (event.type !== 'click' && typeof event.stopPropagation === 'function') {
+                    event.stopPropagation();
+                }
+                if (event.type !== 'click' && typeof event.stopImmediatePropagation === 'function') {
+                    event.stopImmediatePropagation();
+                }
+            }
+
+            const now = Date.now();
+            if (window.__saveExitLock && now - window.__saveExitLock < 250) {
+                return;
+            }
+            window.__saveExitLock = now;
+            window.toggleGamepadEditMode(false);
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             const sizeSlider = document.getElementById('edit-size-slider');
             if (sizeSlider) {
@@ -616,15 +813,23 @@
                         selectedElement.style.transform = `scale(${e.target.value})`;
                     }
                 });
+
+                const stopSliderPropagation = (event) => {
+                    event.stopPropagation();
+                };
+                ['pointerdown', 'pointermove', 'pointerup', 'touchstart', 'touchmove', 'touchend', 'mousedown', 'mouseup'].forEach(evt => {
+                    sizeSlider.addEventListener(evt, stopSliderPropagation, { passive: false });
+                });
             }
             const saveBtn = document.getElementById('edit-save-btn');
             if (saveBtn) {
-                saveBtn.addEventListener('click', () => {
-                    window.toggleGamepadEditMode(false);
-                });
+                saveBtn.addEventListener('click', triggerSaveExit);
+                saveBtn.addEventListener('pointerup', triggerSaveExit);
+                saveBtn.addEventListener('touchend', triggerSaveExit);
+                saveBtn.addEventListener('mouseup', triggerSaveExit);
             }
         });
-        
+
     </script>
 
     <!-- Edit Layout Menu -->
