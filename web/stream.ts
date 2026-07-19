@@ -20,6 +20,7 @@ declare global {
         vGamepad?: any;
         toggleVirtualGamepad?: (btn: HTMLButtonElement) => void;
         unplugVirtualGamepad?: (btn: HTMLButtonElement) => void;
+        vpadConfig?: any;
     }
 }
 
@@ -140,728 +141,728 @@ class ViewerApp implements Component {
 
     private api: Api
 
-    private sidebar: ViewerSidebar
-
-    private div = document.createElement("div")
-
-    private statsDiv = document.createElement("div")
-    private localTouchCursorDiv = document.createElement("div")
-    private stream: Stream
-
-    private inputConfig: StreamInputConfig = defaultStreamInputConfig()
-    private previousMouseMode: MouseMode
-    private autoEnterFullscreenOnStart: boolean = false
-    private pendingAutoFullscreenPrompt: boolean = false
-    private fullscreenPromptShown: boolean = false
-    private fullscreenOnNextInteractionArmed: boolean = false
-    private pendingAutoFullscreenTouchGesture: boolean = false
-    private pendingAutoFullscreenMouseGesture: boolean = false
-    private manualFullscreenExitRequested: boolean = false
-    private toggleFullscreenWithKeybind: boolean = false
-    private hasShownFullscreenEscapeWarning = false
-    private keyboardViewportBaselineHeight: number | null = null
-    private streamVideoTopOffsetPx: number = 0
-
-    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
-        this.api = api
-
-        const defaultSettings = getLocalStreamSettings(bootstrapRole.default_settings)
-        const settings = {
-            ...defaultSettings,
-            ...options,
-            videoSizeCustom: {
-                ...defaultSettings.videoSizeCustom,
-                ...options?.videoSizeCustom,
-            },
-        }
-        Object.assign(this.inputConfig, {
-            mouseMode: settings.mouseMode,
-            mouseScrollMode: settings.mouseScrollMode,
-            touchMode: settings.touchMode,
-            localCursorSensitivity: settings.localCursorSensitivity,
-            controllerConfig: settings.controllerConfig
-        })
-
-        // Configure sidebar
-        this.sidebar = new ViewerSidebar(this)
-        setSidebar(this.sidebar)
-
-        // Configure stats element
-        this.statsDiv.hidden = true
-        this.statsDiv.classList.add("video-stats")
-        this.localTouchCursorDiv.hidden = true
-        this.localTouchCursorDiv.classList.add("local-touch-cursor")
-
-        setInterval(() => {
-            // Update stats display every 100ms
-            const stats = this.getStream()?.getStats()
-            if (stats && stats.isEnabled()) {
-                this.statsDiv.hidden = false
-
-                const text = streamStatsToText(stats.getCurrentStats())
-                this.statsDiv.innerText = text
-            } else {
-                this.statsDiv.hidden = true
-            }
-        }, 100)
-        this.div.appendChild(this.statsDiv)
-        this.div.appendChild(this.localTouchCursorDiv)
-
-        // Configure stream
-        this.previousMouseMode = this.inputConfig.mouseMode
-
-        const browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-        const browserHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-
-        this.autoEnterFullscreenOnStart = settings.enterFullscreenOnStreamStart
-        this.toggleFullscreenWithKeybind = settings.toggleFullscreenWithKeybind
-
-        this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions)
-        this.startStream(hostId, appId, bootstrapRole.permissions, settings, [browserWidth, browserHeight])
-
-        // Configure input
-        this.addListeners(document)
-        this.addListeners(document.getElementById("input") as HTMLDivElement)
-
-        window.addEventListener("blur", () => {
-            this.stream.getInput().raiseAllKeys()
-        })
-        document.addEventListener("visibilitychange", () => {
-            if (document.visibilityState !== "visible") {
-                this.stream.getInput().raiseAllKeys()
-            }
-        })
-
-        document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
-        document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
-
-        window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
-        window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
-        // Connect all gamepads
-        for (const gamepad of navigator.getGamepads()) {
-            if (gamepad != null) {
-                this.onGamepadAdd(gamepad)
-            }
-        }
-    }
-    private addListeners(element: GlobalEventHandlers) {
-        element.addEventListener("keydown", this.onKeyDown.bind(this), { passive: false })
-        element.addEventListener("keyup", this.onKeyUp.bind(this), { passive: false })
-        element.addEventListener("paste", this.onPaste.bind(this))
-
-        element.addEventListener("mousedown", this.onMouseButtonDown.bind(this), { passive: false })
-        element.addEventListener("mouseup", this.onMouseButtonUp.bind(this), { passive: false })
-        element.addEventListener("mousemove", this.onMouseMove.bind(this), { passive: false })
-        element.addEventListener("wheel", this.onMouseWheel.bind(this), { passive: false })
-        element.addEventListener("contextmenu", this.onContextMenu.bind(this), { passive: false })
-
-        element.addEventListener("touchstart", this.onTouchStart.bind(this), { passive: false })
-        element.addEventListener("touchend", this.onTouchEnd.bind(this), { passive: false })
-        element.addEventListener("touchcancel", this.onTouchCancel.bind(this), { passive: false })
-        element.addEventListener("touchmove", this.onTouchMove.bind(this), { passive: false })
-    }
-
-    private async startStream(hostId: number, appId: number, permissions: StreamPermissions, settings: Settings, browserSize: [number, number]) {
-        setSidebarStyle({
-            edge: settings.sidebarEdge,
-        })
-
-        // Add app info listener
-        this.stream.addInfoListener(this.onInfo.bind(this))
-
-        // Create connection info modal
-        const connectionInfo = new ConnectionInfoModal()
-        const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
-        this.stream.addInfoListener(connectionInfoListener)
-        void showModal(connectionInfo).then(async () => {
-            this.stream.removeInfoListener(connectionInfoListener)
-            if (this.autoEnterFullscreenOnStart && this.pendingAutoFullscreenPrompt && !this.fullscreenPromptShown && !this.isFullscreen()) {
-                this.fullscreenPromptShown = true
-                this.pendingAutoFullscreenPrompt = false
-                this.armFullscreenOnNextInteraction()
-            }
-        })
-
-        // Start animation frame loop
-        this.onTouchUpdate()
-        this.onGamepadUpdate()
-
-        this.stream.getInput().addScreenKeyboardVisibleEvent(this.onScreenKeyboardSetVisible.bind(this))
-
-        this.stream.mount(this.div)
-
-        if (this.autoEnterFullscreenOnStart) {
-            this.pendingAutoFullscreenPrompt = true
-        }
-    }
-
-    private async onInfo(event: InfoEvent) {
-        const data = event.detail
-
-        if (data.type == "app") {
-            const app = data.app
-
-            document.title = `Stream: ${app.title}`
-        } else if (data.type == "connectionComplete") {
-            this.sidebar.onCapabilitiesChange(data.capabilities)
-        }
-    }
-
-    private focusInput() {
-        if (this.stream.getInput().getCurrentPredictedTouchAction() != "screenKeyboard" && !this.sidebar.getScreenKeyboard().isVisible()) {
-            const inputElement = document.getElementById("input") as HTMLDivElement
-            inputElement.focus()
-        }
-    }
-
-    onUserInteraction() {
-        this.focusInput()
-
-        this.stream.getVideoRenderer()?.onUserInteraction()
-        this.stream.getAudioPlayer()?.onUserInteraction()
-    }
-    private armFullscreenOnNextInteraction() {
-        if (this.autoEnterFullscreenOnStart) {
-            this.fullscreenOnNextInteractionArmed = true
-        }
-    }
-    private consumeAutoFullscreenInteraction(): boolean {
-        if (!this.fullscreenOnNextInteractionArmed || this.isFullscreen()) {
-            return false
-        }
-
-        this.fullscreenOnNextInteractionArmed = false
-        void this.requestFullscreen().then(() => {
-            if (!this.isFullscreen()) {
-                this.armFullscreenOnNextInteraction()
-            }
-        })
-        return true
-    }
-    private beginAutoFullscreenTouchGesture(): boolean {
-        if (!this.fullscreenOnNextInteractionArmed || this.isFullscreen()) {
-            return false
-        }
-
-        this.pendingAutoFullscreenTouchGesture = true
-        return true
-    }
-    private consumeAutoFullscreenTouchGesture(): boolean {
-        if (!this.pendingAutoFullscreenTouchGesture) {
-            return false
-        }
-
-        this.pendingAutoFullscreenTouchGesture = false
-        return this.consumeAutoFullscreenInteraction()
-    }
-    private onScreenKeyboardSetVisible(event: ScreenKeyboardSetVisibleEvent) {
-        console.info(event.detail)
-        const screenKeyboard = this.sidebar.getScreenKeyboard()
-
-        const newShown = event.detail.visible
-        if (newShown != screenKeyboard.isVisible()) {
-            if (newShown) {
-                screenKeyboard.show()
-            } else {
-                screenKeyboard.hide()
-            }
-        }
-    }
-
-    // Input
-    getInputConfig(): StreamInputConfig {
-        return this.inputConfig
-    }
-    setInputConfig(config: StreamInputConfig) {
-        Object.assign(this.inputConfig, config)
-
-        this.stream.getInput().setConfig(this.inputConfig)
-        this.renderLocalTouchCursor()
-    }
-
-    // Keyboard
-    onKeyDown(event: KeyboardEvent) {
-        this.onUserInteraction()
-
-        console.debug(event)
-        if (event.shiftKey && event.ctrlKey && event.code == "KeyV") {
-            // We are likely pasting -> don't send keys
-        } else if (event.code == "F11") {
-            // Allow manual fullscreen
-        } else {
-            event.preventDefault()
-            this.stream.getInput().onKeyDown(event)
-        }
-
-        event.stopPropagation()
-    }
-
-    private isTogglingFullscreenWithKeybind: "waitForCtrl" | "makingFullscreen" | "none" = "none"
-    onKeyUp(event: KeyboardEvent) {
-        this.onUserInteraction()
-
-        event.preventDefault()
-        this.stream.getInput().onKeyUp(event)
-        event.stopPropagation()
-
-        if (this.toggleFullscreenWithKeybind && this.isTogglingFullscreenWithKeybind == "none" && event.ctrlKey && event.shiftKey && event.code == "KeyI") {
-            this.isTogglingFullscreenWithKeybind = "waitForCtrl"
-        }
-        if (this.isTogglingFullscreenWithKeybind == "waitForCtrl" && (event.code == "ControlRight" || event.code == "ControlLeft")) {
-            this.isTogglingFullscreenWithKeybind = "makingFullscreen";
-
-            (async () => {
-                if (this.isFullscreen()) {
-                    await this.exitPointerLock()
-                    await this.exitFullscreen()
-                } else {
-                    await this.requestFullscreen()
-                    await this.requestPointerLock()
-                }
-
-                this.isTogglingFullscreenWithKeybind = "none"
-            })()
-        }
-    }
-
-    onPaste(event: ClipboardEvent) {
-        this.onUserInteraction()
-
-        this.stream.getInput().onPaste(event)
-
-        event.stopPropagation()
-    }
-
-    // Mouse
-    onMouseButtonDown(event: MouseEvent) {
-        if (this.consumeAutoFullscreenInteraction()) {
-            this.pendingAutoFullscreenMouseGesture = true
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        this.onUserInteraction()
-
-        event.preventDefault()
-        this.stream.getInput().onMouseDown(event, this.getStreamRect());
-
-        event.stopPropagation()
-    }
-    onMouseButtonUp(event: MouseEvent) {
-        if (this.pendingAutoFullscreenMouseGesture) {
-            this.pendingAutoFullscreenMouseGesture = false
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        this.onUserInteraction()
-
-        event.preventDefault()
-        this.stream.getInput().onMouseUp(event)
-
-        event.stopPropagation()
-    }
-    onMouseMove(event: MouseEvent) {
-        if (this.pendingAutoFullscreenMouseGesture) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        event.preventDefault()
-        this.stream.getInput().onMouseMove(event, this.getStreamRect())
-
-        event.stopPropagation()
-    }
-    onMouseWheel(event: WheelEvent) {
-        event.preventDefault()
-        this.stream.getInput().onMouseWheel(event)
-
-        event.stopPropagation()
-    }
-    onContextMenu(event: MouseEvent) {
-        event.preventDefault()
-
-        event.stopPropagation()
-    }
-
-    // Touch
-    onTouchStart(event: TouchEvent) {
-        if (this.beginAutoFullscreenTouchGesture()) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        this.onUserInteraction()
-
-        event.preventDefault()
-        this.stream.getInput().onTouchStart(event, this.getStreamRect())
-
-        event.stopPropagation()
-    }
-    onTouchEnd(event: TouchEvent) {
-        if (this.consumeAutoFullscreenTouchGesture()) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        this.onUserInteraction()
-
-        event.preventDefault()
-        this.stream.getInput().onTouchEnd(event, this.getStreamRect())
-
-        event.stopPropagation()
-    }
-    onTouchCancel(event: TouchEvent) {
-        if (this.pendingAutoFullscreenTouchGesture) {
-            this.pendingAutoFullscreenTouchGesture = false
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        this.pendingAutoFullscreenTouchGesture = false
-
-        this.onUserInteraction()
-
-        event?.preventDefault()
-        this.stream.getInput().onTouchCancel(event, this.getStreamRect())
-
-        event.stopPropagation()
-    }
-    onTouchUpdate() {
-        this.stream.getInput().onTouchUpdate(this.getStreamRect())
-        this.updateKeyboardViewportVideoOffset()
-        this.renderLocalTouchCursor()
-
-        window.requestAnimationFrame(this.onTouchUpdate.bind(this))
-    }
-    onTouchMove(event: TouchEvent) {
-        if (this.pendingAutoFullscreenTouchGesture) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
-        event.preventDefault()
-        this.stream.getInput().onTouchMove(event, this.getStreamRect())
-
-        event.stopPropagation()
-    }
-
-    // Gamepad
-    onGamepadConnect(event: GamepadEvent) {
-        this.onGamepadAdd(event.gamepad)
-    }
-    onGamepadAdd(gamepad: Gamepad) {
-        this.stream.getInput().onGamepadConnect(gamepad)
-    }
-    onGamepadDisconnect(event: GamepadEvent) {
-        this.stream.getInput().onGamepadDisconnect(event)
-    }
-    onGamepadUpdate() {
-        this.stream.getInput().onGamepadUpdate()
-
-        window.requestAnimationFrame(this.onGamepadUpdate.bind(this))
-    }
-
-    // Fullscreen
-    private async promptAutoFullscreen() {
-        await showModal(new AutoFullscreenModal(this.requestFullscreen.bind(this)))
-    }
-    async requestFullscreen(showEscapeWarning: boolean = true) {
-        const body = document.body
-        if (body) {
-            if (!("requestFullscreen" in body && typeof body.requestFullscreen == "function")) {
-                await showMessage(I.stream.fullscreenUnsupported)
-
-                return
-            }
-
-            this.focusInput()
-
-            if (!this.isFullscreen()) {
-                try {
-                    await body.requestFullscreen({
-                        navigationUI: "hide"
-                    })
-                } catch (e) {
-                    console.warn("failed to request fullscreen", e)
-                }
-            }
-
-            try {
-                await requestKeyboardLock();
-                if (showEscapeWarning && !this.hasShownFullscreenEscapeWarning) {
-                    showNotification(I.stream.fullscreenEscapeHint, "info")
-                    this.hasShownFullscreenEscapeWarning = true
-                }
-            } catch (e) {
-                console.warn("Keyboard lock failed, skipping notification.", e);
-            }
-
-            if (this.getStream()?.getInput().getConfig().mouseMode == "relative") {
-                await this.requestPointerLock()
-            }
-
-            try {
-                if (screen && "orientation" in screen) {
-                    const orientation = screen.orientation
-
-                    if ("lock" in orientation && typeof orientation.lock == "function") {
-                        await orientation.lock("landscape")
-                    }
-                }
-            } catch (e) {
-                console.warn("failed to set orientation to landscape", e)
-            }
-        } else {
-            console.warn("root element not found")
-        }
-    }
-    async exitFullscreen() {
-        if ("keyboard" in navigator && navigator.keyboard && "unlock" in navigator.keyboard) {
-            await navigator.keyboard.unlock()
-        }
-
-        if ("exitFullscreen" in document && typeof document.exitFullscreen == "function") {
-            await document.exitFullscreen()
-        }
-    }
-    isFullscreen(): boolean {
-        return "fullscreenElement" in document && !!document.fullscreenElement
-    }
-    private async onFullscreenChange() {
-        if (this.isFullscreen()) {
-            this.fullscreenOnNextInteractionArmed = false
-            this.pendingAutoFullscreenTouchGesture = false
-            this.pendingAutoFullscreenMouseGesture = false
-            this.manualFullscreenExitRequested = false
-        } else {
-            const manualExit = this.manualFullscreenExitRequested
-            this.manualFullscreenExitRequested = false
-
-            if (this.autoEnterFullscreenOnStart && !manualExit) {
-                this.armFullscreenOnNextInteraction()
-            }
-        }
-
-        this.checkFullyImmersed()
-    }
-    markManualFullscreenExitRequested() {
-        this.manualFullscreenExitRequested = true
-    }
-
-    // Pointer Lock
-    async requestPointerLock(errorIfNotFound: boolean = false) {
-        this.previousMouseMode = this.inputConfig.mouseMode
-
-        const inputElement = document.getElementById("input") as HTMLDivElement
-
-        if (inputElement && "requestPointerLock" in inputElement && typeof inputElement.requestPointerLock == "function") {
-            this.focusInput()
-
-            this.inputConfig.mouseMode = "relative"
-            this.setInputConfig(this.inputConfig)
-
-            setSidebarExtended(false)
-
-            const onLockError = () => {
-                document.removeEventListener("pointerlockerror", onLockError)
-
-                // Fallback: try to request pointer lock without options
-                inputElement.requestPointerLock()
-            }
-
-            document.addEventListener("pointerlockerror", onLockError, { once: true })
-
-            try {
-                let promise = inputElement.requestPointerLock({
-                    unadjustedMovement: true
-                })
-
-                if (promise) {
-                    await promise
-                } else {
-                    inputElement.requestPointerLock()
-                }
-            } catch (error) {
-                // Some platforms do not support unadjusted movement. If you
-                // would like PointerLock anyway, request again.
-                if (error instanceof Error && error.name == "NotSupportedError") {
-                    inputElement.requestPointerLock()
-                } else {
-                    throw error
-                }
-            } finally {
-                document.removeEventListener("pointerlockerror", onLockError)
-            }
-
-        } else if (errorIfNotFound) {
-            await showMessage(I.stream.pointerLockUnsupported)
-        }
-    }
-    async exitPointerLock() {
-        if ("exitPointerLock" in document && typeof document.exitPointerLock == "function") {
-            document.exitPointerLock()
-        }
-    }
-    private onPointerLockChange() {
-        this.checkFullyImmersed()
-
-        if (!document.pointerLockElement) {
-            this.inputConfig.mouseMode = this.previousMouseMode
-            this.setInputConfig(this.inputConfig)
-        }
-    }
-
-    // -- Fully immersed Fullscreen -> Fullscreen API + Pointer Lock
-    private checkFullyImmersed() {
-        if ("pointerLockElement" in document && document.pointerLockElement &&
-            "fullscreenElement" in document && document.fullscreenElement) {
-            // We're fully immersed -> remove sidebar
-            setSidebar(null)
-        } else {
-            setSidebar(this.sidebar)
-        }
-    }
-    private renderLocalTouchCursor() {
-        const localCursorState = this.stream.getInput().getLocalCursorState()
-        if (!localCursorState?.visible) {
-            this.localTouchCursorDiv.hidden = true
-            return
-        }
-
-        const rect = this.getStreamRect()
-        if (rect.width <= 0 || rect.height <= 0) {
-            this.localTouchCursorDiv.hidden = true
-            return
-        }
-
-        this.localTouchCursorDiv.hidden = false
-        this.localTouchCursorDiv.style.left = `${rect.left + localCursorState.x * rect.width}px`
-        this.localTouchCursorDiv.style.top = `${rect.top + localCursorState.y * rect.height}px`
-    }
-
-    onScreenKeyboardModeWillChange(event: KeyboardModeWillChangeEvent) {
-        if (event.detail.enabled) {
-            this.captureKeyboardViewportBaseline()
-        }
-    }
-
-    private captureKeyboardViewportBaseline() {
-        this.keyboardViewportBaselineHeight = window.visualViewport?.height ?? null
-        this.streamVideoTopOffsetPx = 0
-        this.applyStreamVideoTopOffset()
-        this.updateKeyboardFloatingButtonPosition()
-    }
-    resetKeyboardViewportVideoOffset() {
-        this.keyboardViewportBaselineHeight = null
-        this.streamVideoTopOffsetPx = 0
-        this.applyStreamVideoTopOffset()
-        this.resetKeyboardFloatingButtonPosition()
-    }
-    private updateKeyboardViewportVideoOffset() {
-        this.updateKeyboardFloatingButtonPosition()
-
-        const screenKeyboard = this.sidebar.getScreenKeyboard()
-        const visualViewport = window.visualViewport
-        const baselineHeight = this.keyboardViewportBaselineHeight
-        const localCursorState = this.stream.getInput().getLocalCursorState()
-
-        if (!screenKeyboard.isVisible() || !visualViewport || baselineHeight == null) {
-            if (this.streamVideoTopOffsetPx != 0 && !screenKeyboard.isVisible()) {
-                this.resetKeyboardViewportVideoOffset()
-            }
-            return
-        }
-
-        const viewportShrink = baselineHeight - visualViewport.height
-        if (viewportShrink < 80) {
-            if (this.streamVideoTopOffsetPx != 0) {
-                this.streamVideoTopOffsetPx = 0
-                this.applyStreamVideoTopOffset()
-            }
-            return
-        }
-
-        const streamRect = this.getStreamRect()
-        if (streamRect.width <= 0 || streamRect.height <= 0) {
-            return
-        }
-
-        const visibleTop = visualViewport.offsetTop
-        const visibleBottom = visualViewport.offsetTop + visualViewport.height
-
-        let newTopOffsetPx = this.streamVideoTopOffsetPx
-        if (localCursorState.visible) {
-            let delta = 0
-
-            const safeMargin = Math.min(100, visualViewport.height * 0.25)
-            const cursorY = streamRect.top + localCursorState.y * streamRect.height
-
-            if (cursorY < visibleTop + safeMargin) {
-                delta = visibleTop + safeMargin - cursorY
-            } else if (cursorY > visibleBottom - safeMargin) {
-                delta = visibleBottom - safeMargin - cursorY
-            }
-
-            newTopOffsetPx += delta
-        } else {
-            const screenTopToVideoTop = visualViewport.height - streamRect.height
-            if (screenTopToVideoTop > 0) {
-                newTopOffsetPx = visibleTop - screenTopToVideoTop
-            }
-        }
-
-        if (Math.abs(newTopOffsetPx - this.streamVideoTopOffsetPx) >= 1) {
-            this.streamVideoTopOffsetPx = newTopOffsetPx
-            this.applyStreamVideoTopOffset()
-        }
-    }
-    private applyStreamVideoTopOffset() {
-        if (Math.abs(this.streamVideoTopOffsetPx) < 0.5) {
-            document.documentElement.style.removeProperty("--stream-video-top")
-            return
-        }
-
-        document.documentElement.style.setProperty("--stream-video-top", `calc(50% + ${this.streamVideoTopOffsetPx}px)`)
-    }
-    private updateKeyboardFloatingButtonPosition() {
-        const screenKeyboard = this.sidebar.getScreenKeyboard()
-        const visualViewport = window.visualViewport
-        if (!screenKeyboard.isVisible() || !visualViewport) {
-            this.resetKeyboardFloatingButtonPosition()
-            return
-        }
-
-        const bottomInset = Math.min(16, visualViewport.height * 0.08)
-        const buttonTop = visualViewport.offsetTop + visualViewport.height - bottomInset
-        document.documentElement.style.setProperty("--stream-keyboard-button-top", `${buttonTop}px`)
-    }
-    private resetKeyboardFloatingButtonPosition() {
-        document.documentElement.style.removeProperty("--stream-keyboard-button-top")
-    }
-
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.div)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.div)
-    }
-
-    getStreamRect(): DOMRect {
-        // The bounding rect of the videoElement or canvasElement can be bigger than the actual video
-        // -> We need to correct for this when sending positions, else positions are wrong
-        return this.stream.getVideoRenderer()?.getStreamRect() ?? new DOMRect()
-    }
-    getStream(): Stream | null {
-        return this.stream
-    }
+        private sidebar: ViewerSidebar
+
+            private div = document.createElement("div")
+
+            private statsDiv = document.createElement("div")
+            private localTouchCursorDiv = document.createElement("div")
+            private stream: Stream
+
+                private inputConfig: StreamInputConfig = defaultStreamInputConfig()
+                    private previousMouseMode: MouseMode
+                        private autoEnterFullscreenOnStart: boolean = false
+                            private pendingAutoFullscreenPrompt: boolean = false
+                                private fullscreenPromptShown: boolean = false
+                                    private fullscreenOnNextInteractionArmed: boolean = false
+                                        private pendingAutoFullscreenTouchGesture: boolean = false
+                                            private pendingAutoFullscreenMouseGesture: boolean = false
+                                                private manualFullscreenExitRequested: boolean = false
+                                                    private toggleFullscreenWithKeybind: boolean = false
+                                                        private hasShownFullscreenEscapeWarning = false
+                                                        private keyboardViewportBaselineHeight: number | null = null
+                                                            private streamVideoTopOffsetPx: number = 0
+
+                                                                constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
+                                                                    this.api = api
+
+                                                                    const defaultSettings = getLocalStreamSettings(bootstrapRole.default_settings)
+                                                                    const settings = {
+                                                                        ...defaultSettings,
+                                                                        ...options,
+                                                                        videoSizeCustom: {
+                                                                            ...defaultSettings.videoSizeCustom,
+                                                                            ...options?.videoSizeCustom,
+                                                                        },
+                                                                    }
+                                                                    Object.assign(this.inputConfig, {
+                                                                        mouseMode: settings.mouseMode,
+                                                                        mouseScrollMode: settings.mouseScrollMode,
+                                                                        touchMode: settings.touchMode,
+                                                                        localCursorSensitivity: settings.localCursorSensitivity,
+                                                                        controllerConfig: settings.controllerConfig
+                                                                    })
+
+                                                                    // Configure sidebar
+                                                                    this.sidebar = new ViewerSidebar(this)
+                                                                    setSidebar(this.sidebar)
+
+                                                                    // Configure stats element
+                                                                    this.statsDiv.hidden = true
+                                                                    this.statsDiv.classList.add("video-stats")
+                                                                    this.localTouchCursorDiv.hidden = true
+                                                                    this.localTouchCursorDiv.classList.add("local-touch-cursor")
+
+                                                                    setInterval(() => {
+                                                                        // Update stats display every 100ms
+                                                                        const stats = this.getStream()?.getStats()
+                                                                        if (stats && stats.isEnabled()) {
+                                                                            this.statsDiv.hidden = false
+
+                                                                            const text = streamStatsToText(stats.getCurrentStats())
+                                                                            this.statsDiv.innerText = text
+                                                                        } else {
+                                                                            this.statsDiv.hidden = true
+                                                                        }
+                                                                    }, 100)
+                                                                    this.div.appendChild(this.statsDiv)
+                                                                    this.div.appendChild(this.localTouchCursorDiv)
+
+                                                                    // Configure stream
+                                                                    this.previousMouseMode = this.inputConfig.mouseMode
+
+                                                                    const browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+                                                                    const browserHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+
+                                                                    this.autoEnterFullscreenOnStart = settings.enterFullscreenOnStreamStart
+                                                                    this.toggleFullscreenWithKeybind = settings.toggleFullscreenWithKeybind
+
+                                                                    this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions)
+                                                                    this.startStream(hostId, appId, bootstrapRole.permissions, settings, [browserWidth, browserHeight])
+
+                                                                    // Configure input
+                                                                    this.addListeners(document)
+                                                                    this.addListeners(document.getElementById("input") as HTMLDivElement)
+
+                                                                    window.addEventListener("blur", () => {
+                                                                        this.stream.getInput().raiseAllKeys()
+                                                                    })
+                                                                    document.addEventListener("visibilitychange", () => {
+                                                                        if (document.visibilityState !== "visible") {
+                                                                            this.stream.getInput().raiseAllKeys()
+                                                                        }
+                                                                    })
+
+                                                                    document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
+                                                                    document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
+
+                                                                    window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
+                                                                    window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
+                                                                    // Connect all gamepads
+                                                                    for (const gamepad of navigator.getGamepads()) {
+                                                                        if (gamepad != null) {
+                                                                            this.onGamepadAdd(gamepad)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                private addListeners(element: GlobalEventHandlers) {
+                                                                    element.addEventListener("keydown", this.onKeyDown.bind(this), { passive: false })
+                                                                    element.addEventListener("keyup", this.onKeyUp.bind(this), { passive: false })
+                                                                    element.addEventListener("paste", this.onPaste.bind(this))
+
+                                                                    element.addEventListener("mousedown", this.onMouseButtonDown.bind(this), { passive: false })
+                                                                    element.addEventListener("mouseup", this.onMouseButtonUp.bind(this), { passive: false })
+                                                                    element.addEventListener("mousemove", this.onMouseMove.bind(this), { passive: false })
+                                                                    element.addEventListener("wheel", this.onMouseWheel.bind(this), { passive: false })
+                                                                    element.addEventListener("contextmenu", this.onContextMenu.bind(this), { passive: false })
+
+                                                                    element.addEventListener("touchstart", this.onTouchStart.bind(this), { passive: false })
+                                                                    element.addEventListener("touchend", this.onTouchEnd.bind(this), { passive: false })
+                                                                    element.addEventListener("touchcancel", this.onTouchCancel.bind(this), { passive: false })
+                                                                    element.addEventListener("touchmove", this.onTouchMove.bind(this), { passive: false })
+                                                                }
+
+                                                                private async startStream(hostId: number, appId: number, permissions: StreamPermissions, settings: Settings, browserSize: [number, number]) {
+                                                                    setSidebarStyle({
+                                                                        edge: settings.sidebarEdge,
+                                                                    })
+
+                                                                    // Add app info listener
+                                                                    this.stream.addInfoListener(this.onInfo.bind(this))
+
+                                                                    // Create connection info modal
+                                                                    const connectionInfo = new ConnectionInfoModal()
+                                                                    const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
+                                                                    this.stream.addInfoListener(connectionInfoListener)
+                                                                    void showModal(connectionInfo).then(async () => {
+                                                                        this.stream.removeInfoListener(connectionInfoListener)
+                                                                        if (this.autoEnterFullscreenOnStart && this.pendingAutoFullscreenPrompt && !this.fullscreenPromptShown && !this.isFullscreen()) {
+                                                                            this.fullscreenPromptShown = true
+                                                                            this.pendingAutoFullscreenPrompt = false
+                                                                            this.armFullscreenOnNextInteraction()
+                                                                        }
+                                                                    })
+
+                                                                    // Start animation frame loop
+                                                                    this.onTouchUpdate()
+                                                                    this.onGamepadUpdate()
+
+                                                                    this.stream.getInput().addScreenKeyboardVisibleEvent(this.onScreenKeyboardSetVisible.bind(this))
+
+                                                                    this.stream.mount(this.div)
+
+                                                                    if (this.autoEnterFullscreenOnStart) {
+                                                                        this.pendingAutoFullscreenPrompt = true
+                                                                    }
+                                                                }
+
+                                                                private async onInfo(event: InfoEvent) {
+                                                                    const data = event.detail
+
+                                                                    if (data.type == "app") {
+                                                                        const app = data.app
+
+                                                                        document.title = `Stream: ${app.title}`
+                                                                    } else if (data.type == "connectionComplete") {
+                                                                        this.sidebar.onCapabilitiesChange(data.capabilities)
+                                                                    }
+                                                                }
+
+                                                                private focusInput() {
+                                                                    if (this.stream.getInput().getCurrentPredictedTouchAction() != "screenKeyboard" && !this.sidebar.getScreenKeyboard().isVisible()) {
+                                                                        const inputElement = document.getElementById("input") as HTMLDivElement
+                                                                        inputElement.focus()
+                                                                    }
+                                                                }
+
+                                                                onUserInteraction() {
+                                                                    this.focusInput()
+
+                                                                    this.stream.getVideoRenderer()?.onUserInteraction()
+                                                                    this.stream.getAudioPlayer()?.onUserInteraction()
+                                                                }
+                                                                private armFullscreenOnNextInteraction() {
+                                                                    if (this.autoEnterFullscreenOnStart) {
+                                                                        this.fullscreenOnNextInteractionArmed = true
+                                                                    }
+                                                                }
+                                                                private consumeAutoFullscreenInteraction(): boolean {
+                                                                    if (!this.fullscreenOnNextInteractionArmed || this.isFullscreen()) {
+                                                                        return false
+                                                                    }
+
+                                                                    this.fullscreenOnNextInteractionArmed = false
+                                                                    void this.requestFullscreen().then(() => {
+                                                                        if (!this.isFullscreen()) {
+                                                                            this.armFullscreenOnNextInteraction()
+                                                                        }
+                                                                    })
+                                                                    return true
+                                                                }
+                                                                private beginAutoFullscreenTouchGesture(): boolean {
+                                                                    if (!this.fullscreenOnNextInteractionArmed || this.isFullscreen()) {
+                                                                        return false
+                                                                    }
+
+                                                                    this.pendingAutoFullscreenTouchGesture = true
+                                                                    return true
+                                                                }
+                                                                private consumeAutoFullscreenTouchGesture(): boolean {
+                                                                    if (!this.pendingAutoFullscreenTouchGesture) {
+                                                                        return false
+                                                                    }
+
+                                                                    this.pendingAutoFullscreenTouchGesture = false
+                                                                    return this.consumeAutoFullscreenInteraction()
+                                                                }
+                                                                private onScreenKeyboardSetVisible(event: ScreenKeyboardSetVisibleEvent) {
+                                                                    console.info(event.detail)
+                                                                    const screenKeyboard = this.sidebar.getScreenKeyboard()
+
+                                                                    const newShown = event.detail.visible
+                                                                    if (newShown != screenKeyboard.isVisible()) {
+                                                                        if (newShown) {
+                                                                            screenKeyboard.show()
+                                                                        } else {
+                                                                            screenKeyboard.hide()
+                                                                        }
+                                                                    }
+                                                                }
+
+                                                                // Input
+                                                                getInputConfig(): StreamInputConfig {
+                                                                    return this.inputConfig
+                                                                }
+                                                                setInputConfig(config: StreamInputConfig) {
+                                                                    Object.assign(this.inputConfig, config)
+
+                                                                    this.stream.getInput().setConfig(this.inputConfig)
+                                                                    this.renderLocalTouchCursor()
+                                                                }
+
+                                                                // Keyboard
+                                                                onKeyDown(event: KeyboardEvent) {
+                                                                    this.onUserInteraction()
+
+                                                                    console.debug(event)
+                                                                    if (event.shiftKey && event.ctrlKey && event.code == "KeyV") {
+                                                                        // We are likely pasting -> don't send keys
+                                                                    } else if (event.code == "F11") {
+                                                                        // Allow manual fullscreen
+                                                                    } else {
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onKeyDown(event)
+                                                                    }
+
+                                                                    event.stopPropagation()
+                                                                }
+
+                                                                private isTogglingFullscreenWithKeybind: "waitForCtrl" | "makingFullscreen" | "none" = "none"
+                                                                    onKeyUp(event: KeyboardEvent) {
+                                                                        this.onUserInteraction()
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onKeyUp(event)
+                                                                        event.stopPropagation()
+
+                                                                        if (this.toggleFullscreenWithKeybind && this.isTogglingFullscreenWithKeybind == "none" && event.ctrlKey && event.shiftKey && event.code == "KeyI") {
+                                                                            this.isTogglingFullscreenWithKeybind = "waitForCtrl"
+                                                                        }
+                                                                        if (this.isTogglingFullscreenWithKeybind == "waitForCtrl" && (event.code == "ControlRight" || event.code == "ControlLeft")) {
+                                                                            this.isTogglingFullscreenWithKeybind = "makingFullscreen";
+
+                                                                            (async () => {
+                                                                                if (this.isFullscreen()) {
+                                                                                    await this.exitPointerLock()
+                                                                                    await this.exitFullscreen()
+                                                                                } else {
+                                                                                    await this.requestFullscreen()
+                                                                                    await this.requestPointerLock()
+                                                                                }
+
+                                                                                this.isTogglingFullscreenWithKeybind = "none"
+                                                                            })()
+                                                                        }
+                                                                    }
+
+                                                                    onPaste(event: ClipboardEvent) {
+                                                                        this.onUserInteraction()
+
+                                                                        this.stream.getInput().onPaste(event)
+
+                                                                        event.stopPropagation()
+                                                                    }
+
+                                                                    // Mouse
+                                                                    onMouseButtonDown(event: MouseEvent) {
+                                                                        if (this.consumeAutoFullscreenInteraction()) {
+                                                                            this.pendingAutoFullscreenMouseGesture = true
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        this.onUserInteraction()
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onMouseDown(event, this.getStreamRect());
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onMouseButtonUp(event: MouseEvent) {
+                                                                        if (this.pendingAutoFullscreenMouseGesture) {
+                                                                            this.pendingAutoFullscreenMouseGesture = false
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        this.onUserInteraction()
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onMouseUp(event)
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onMouseMove(event: MouseEvent) {
+                                                                        if (this.pendingAutoFullscreenMouseGesture) {
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onMouseMove(event, this.getStreamRect())
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onMouseWheel(event: WheelEvent) {
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onMouseWheel(event)
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onContextMenu(event: MouseEvent) {
+                                                                        event.preventDefault()
+
+                                                                        event.stopPropagation()
+                                                                    }
+
+                                                                    // Touch
+                                                                    onTouchStart(event: TouchEvent) {
+                                                                        if (this.beginAutoFullscreenTouchGesture()) {
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        this.onUserInteraction()
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onTouchStart(event, this.getStreamRect())
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onTouchEnd(event: TouchEvent) {
+                                                                        if (this.consumeAutoFullscreenTouchGesture()) {
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        this.onUserInteraction()
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onTouchEnd(event, this.getStreamRect())
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onTouchCancel(event: TouchEvent) {
+                                                                        if (this.pendingAutoFullscreenTouchGesture) {
+                                                                            this.pendingAutoFullscreenTouchGesture = false
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        this.pendingAutoFullscreenTouchGesture = false
+
+                                                                        this.onUserInteraction()
+
+                                                                        event?.preventDefault()
+                                                                        this.stream.getInput().onTouchCancel(event, this.getStreamRect())
+
+                                                                        event.stopPropagation()
+                                                                    }
+                                                                    onTouchUpdate() {
+                                                                        this.stream.getInput().onTouchUpdate(this.getStreamRect())
+                                                                        this.updateKeyboardViewportVideoOffset()
+                                                                        this.renderLocalTouchCursor()
+
+                                                                        window.requestAnimationFrame(this.onTouchUpdate.bind(this))
+                                                                    }
+                                                                    onTouchMove(event: TouchEvent) {
+                                                                        if (this.pendingAutoFullscreenTouchGesture) {
+                                                                            event.preventDefault()
+                                                                            event.stopPropagation()
+                                                                            return
+                                                                        }
+
+                                                                        event.preventDefault()
+                                                                        this.stream.getInput().onTouchMove(event, this.getStreamRect())
+
+                                                                        event.stopPropagation()
+                                                                    }
+
+                                                                    // Gamepad
+                                                                    onGamepadConnect(event: GamepadEvent) {
+                                                                        this.onGamepadAdd(event.gamepad)
+                                                                    }
+                                                                    onGamepadAdd(gamepad: Gamepad) {
+                                                                        this.stream.getInput().onGamepadConnect(gamepad)
+                                                                    }
+                                                                    onGamepadDisconnect(event: GamepadEvent) {
+                                                                        this.stream.getInput().onGamepadDisconnect(event)
+                                                                    }
+                                                                    onGamepadUpdate() {
+                                                                        this.stream.getInput().onGamepadUpdate()
+
+                                                                        window.requestAnimationFrame(this.onGamepadUpdate.bind(this))
+                                                                    }
+
+                                                                    // Fullscreen
+                                                                    private async promptAutoFullscreen() {
+                                                                        await showModal(new AutoFullscreenModal(this.requestFullscreen.bind(this)))
+                                                                    }
+                                                                    async requestFullscreen(showEscapeWarning: boolean = true) {
+                                                                        const body = document.body
+                                                                        if (body) {
+                                                                            if (!("requestFullscreen" in body && typeof body.requestFullscreen == "function")) {
+                                                                                await showMessage(I.stream.fullscreenUnsupported)
+
+                                                                                return
+                                                                            }
+
+                                                                            this.focusInput()
+
+                                                                            if (!this.isFullscreen()) {
+                                                                                try {
+                                                                                    await body.requestFullscreen({
+                                                                                        navigationUI: "hide"
+                                                                                    })
+                                                                                } catch (e) {
+                                                                                    console.warn("failed to request fullscreen", e)
+                                                                                }
+                                                                            }
+
+                                                                            try {
+                                                                                await requestKeyboardLock();
+                                                                                if (showEscapeWarning && !this.hasShownFullscreenEscapeWarning) {
+                                                                                    showNotification(I.stream.fullscreenEscapeHint, "info")
+                                                                                    this.hasShownFullscreenEscapeWarning = true
+                                                                                }
+                                                                            } catch (e) {
+                                                                                console.warn("Keyboard lock failed, skipping notification.", e);
+                                                                            }
+
+                                                                            if (this.getStream()?.getInput().getConfig().mouseMode == "relative") {
+                                                                                await this.requestPointerLock()
+                                                                            }
+
+                                                                            try {
+                                                                                if (screen && "orientation" in screen) {
+                                                                                    const orientation = screen.orientation
+
+                                                                                    if ("lock" in orientation && typeof orientation.lock == "function") {
+                                                                                        await orientation.lock("landscape")
+                                                                                    }
+                                                                                }
+                                                                            } catch (e) {
+                                                                                console.warn("failed to set orientation to landscape", e)
+                                                                            }
+                                                                        } else {
+                                                                            console.warn("root element not found")
+                                                                        }
+                                                                    }
+                                                                    async exitFullscreen() {
+                                                                        if ("keyboard" in navigator && navigator.keyboard && "unlock" in navigator.keyboard) {
+                                                                            await navigator.keyboard.unlock()
+                                                                        }
+
+                                                                        if ("exitFullscreen" in document && typeof document.exitFullscreen == "function") {
+                                                                            await document.exitFullscreen()
+                                                                        }
+                                                                    }
+                                                                    isFullscreen(): boolean {
+                                                                        return "fullscreenElement" in document && !!document.fullscreenElement
+                                                                    }
+                                                                    private async onFullscreenChange() {
+                                                                        if (this.isFullscreen()) {
+                                                                            this.fullscreenOnNextInteractionArmed = false
+                                                                            this.pendingAutoFullscreenTouchGesture = false
+                                                                            this.pendingAutoFullscreenMouseGesture = false
+                                                                            this.manualFullscreenExitRequested = false
+                                                                        } else {
+                                                                            const manualExit = this.manualFullscreenExitRequested
+                                                                            this.manualFullscreenExitRequested = false
+
+                                                                            if (this.autoEnterFullscreenOnStart && !manualExit) {
+                                                                                this.armFullscreenOnNextInteraction()
+                                                                            }
+                                                                        }
+
+                                                                        this.checkFullyImmersed()
+                                                                    }
+                                                                    markManualFullscreenExitRequested() {
+                                                                        this.manualFullscreenExitRequested = true
+                                                                    }
+
+                                                                    // Pointer Lock
+                                                                    async requestPointerLock(errorIfNotFound: boolean = false) {
+                                                                        this.previousMouseMode = this.inputConfig.mouseMode
+
+                                                                        const inputElement = document.getElementById("input") as HTMLDivElement
+
+                                                                        if (inputElement && "requestPointerLock" in inputElement && typeof inputElement.requestPointerLock == "function") {
+                                                                            this.focusInput()
+
+                                                                            this.inputConfig.mouseMode = "relative"
+                                                                            this.setInputConfig(this.inputConfig)
+
+                                                                            setSidebarExtended(false)
+
+                                                                            const onLockError = () => {
+                                                                                document.removeEventListener("pointerlockerror", onLockError)
+
+                                                                                // Fallback: try to request pointer lock without options
+                                                                                inputElement.requestPointerLock()
+                                                                            }
+
+                                                                            document.addEventListener("pointerlockerror", onLockError, { once: true })
+
+                                                                            try {
+                                                                                let promise = inputElement.requestPointerLock({
+                                                                                    unadjustedMovement: true
+                                                                                })
+
+                                                                                if (promise) {
+                                                                                    await promise
+                                                                                } else {
+                                                                                    inputElement.requestPointerLock()
+                                                                                }
+                                                                            } catch (error) {
+                                                                                // Some platforms do not support unadjusted movement. If you
+                                                                                // would like PointerLock anyway, request again.
+                                                                                if (error instanceof Error && error.name == "NotSupportedError") {
+                                                                                    inputElement.requestPointerLock()
+                                                                                } else {
+                                                                                    throw error
+                                                                                }
+                                                                            } finally {
+                                                                                document.removeEventListener("pointerlockerror", onLockError)
+                                                                            }
+
+                                                                        } else if (errorIfNotFound) {
+                                                                            await showMessage(I.stream.pointerLockUnsupported)
+                                                                        }
+                                                                    }
+                                                                    async exitPointerLock() {
+                                                                        if ("exitPointerLock" in document && typeof document.exitPointerLock == "function") {
+                                                                            document.exitPointerLock()
+                                                                        }
+                                                                    }
+                                                                    private onPointerLockChange() {
+                                                                        this.checkFullyImmersed()
+
+                                                                        if (!document.pointerLockElement) {
+                                                                            this.inputConfig.mouseMode = this.previousMouseMode
+                                                                            this.setInputConfig(this.inputConfig)
+                                                                        }
+                                                                    }
+
+                                                                    // -- Fully immersed Fullscreen -> Fullscreen API + Pointer Lock
+                                                                    private checkFullyImmersed() {
+                                                                        if ("pointerLockElement" in document && document.pointerLockElement &&
+                                                                            "fullscreenElement" in document && document.fullscreenElement) {
+                                                                            // We're fully immersed -> remove sidebar
+                                                                            setSidebar(null)
+                                                                            } else {
+                                                                                setSidebar(this.sidebar)
+                                                                            }
+                                                                    }
+                                                                    private renderLocalTouchCursor() {
+                                                                        const localCursorState = this.stream.getInput().getLocalCursorState()
+                                                                        if (!localCursorState?.visible) {
+                                                                            this.localTouchCursorDiv.hidden = true
+                                                                            return
+                                                                        }
+
+                                                                        const rect = this.getStreamRect()
+                                                                        if (rect.width <= 0 || rect.height <= 0) {
+                                                                            this.localTouchCursorDiv.hidden = true
+                                                                            return
+                                                                        }
+
+                                                                        this.localTouchCursorDiv.hidden = false
+                                                                        this.localTouchCursorDiv.style.left = `${rect.left + localCursorState.x * rect.width}px`
+                                                                        this.localTouchCursorDiv.style.top = `${rect.top + localCursorState.y * rect.height}px`
+                                                                    }
+
+                                                                    onScreenKeyboardModeWillChange(event: KeyboardModeWillChangeEvent) {
+                                                                        if (event.detail.enabled) {
+                                                                            this.captureKeyboardViewportBaseline()
+                                                                        }
+                                                                    }
+
+                                                                    private captureKeyboardViewportBaseline() {
+                                                                        this.keyboardViewportBaselineHeight = window.visualViewport?.height ?? null
+                                                                        this.streamVideoTopOffsetPx = 0
+                                                                        this.applyStreamVideoTopOffset()
+                                                                        this.updateKeyboardFloatingButtonPosition()
+                                                                    }
+                                                                    resetKeyboardViewportVideoOffset() {
+                                                                        this.keyboardViewportBaselineHeight = null
+                                                                        this.streamVideoTopOffsetPx = 0
+                                                                        this.applyStreamVideoTopOffset()
+                                                                        this.resetKeyboardFloatingButtonPosition()
+                                                                    }
+                                                                    private updateKeyboardViewportVideoOffset() {
+                                                                        this.updateKeyboardFloatingButtonPosition()
+
+                                                                        const screenKeyboard = this.sidebar.getScreenKeyboard()
+                                                                        const visualViewport = window.visualViewport
+                                                                        const baselineHeight = this.keyboardViewportBaselineHeight
+                                                                        const localCursorState = this.stream.getInput().getLocalCursorState()
+
+                                                                        if (!screenKeyboard.isVisible() || !visualViewport || baselineHeight == null) {
+                                                                            if (this.streamVideoTopOffsetPx != 0 && !screenKeyboard.isVisible()) {
+                                                                                this.resetKeyboardViewportVideoOffset()
+                                                                            }
+                                                                            return
+                                                                        }
+
+                                                                        const viewportShrink = baselineHeight - visualViewport.height
+                                                                        if (viewportShrink < 80) {
+                                                                            if (this.streamVideoTopOffsetPx != 0) {
+                                                                                this.streamVideoTopOffsetPx = 0
+                                                                                this.applyStreamVideoTopOffset()
+                                                                            }
+                                                                            return
+                                                                        }
+
+                                                                        const streamRect = this.getStreamRect()
+                                                                        if (streamRect.width <= 0 || streamRect.height <= 0) {
+                                                                            return
+                                                                        }
+
+                                                                        const visibleTop = visualViewport.offsetTop
+                                                                        const visibleBottom = visualViewport.offsetTop + visualViewport.height
+
+                                                                        let newTopOffsetPx = this.streamVideoTopOffsetPx
+                                                                        if (localCursorState.visible) {
+                                                                            let delta = 0
+
+                                                                            const safeMargin = Math.min(100, visualViewport.height * 0.25)
+                                                                            const cursorY = streamRect.top + localCursorState.y * streamRect.height
+
+                                                                            if (cursorY < visibleTop + safeMargin) {
+                                                                                delta = visibleTop + safeMargin - cursorY
+                                                                            } else if (cursorY > visibleBottom - safeMargin) {
+                                                                                delta = visibleBottom - safeMargin - cursorY
+                                                                            }
+
+                                                                            newTopOffsetPx += delta
+                                                                        } else {
+                                                                            const screenTopToVideoTop = visualViewport.height - streamRect.height
+                                                                            if (screenTopToVideoTop > 0) {
+                                                                                newTopOffsetPx = visibleTop - screenTopToVideoTop
+                                                                            }
+                                                                        }
+
+                                                                        if (Math.abs(newTopOffsetPx - this.streamVideoTopOffsetPx) >= 1) {
+                                                                            this.streamVideoTopOffsetPx = newTopOffsetPx
+                                                                            this.applyStreamVideoTopOffset()
+                                                                        }
+                                                                    }
+                                                                    private applyStreamVideoTopOffset() {
+                                                                        if (Math.abs(this.streamVideoTopOffsetPx) < 0.5) {
+                                                                            document.documentElement.style.removeProperty("--stream-video-top")
+                                                                            return
+                                                                        }
+
+                                                                        document.documentElement.style.setProperty("--stream-video-top", `calc(50% + ${this.streamVideoTopOffsetPx}px)`)
+                                                                    }
+                                                                    private updateKeyboardFloatingButtonPosition() {
+                                                                        const screenKeyboard = this.sidebar.getScreenKeyboard()
+                                                                        const visualViewport = window.visualViewport
+                                                                        if (!screenKeyboard.isVisible() || !visualViewport) {
+                                                                            this.resetKeyboardFloatingButtonPosition()
+                                                                            return
+                                                                        }
+
+                                                                        const bottomInset = Math.min(16, visualViewport.height * 0.08)
+                                                                        const buttonTop = visualViewport.offsetTop + visualViewport.height - bottomInset
+                                                                        document.documentElement.style.setProperty("--stream-keyboard-button-top", `${buttonTop}px`)
+                                                                    }
+                                                                    private resetKeyboardFloatingButtonPosition() {
+                                                                        document.documentElement.style.removeProperty("--stream-keyboard-button-top")
+                                                                    }
+
+                                                                    mount(parent: HTMLElement): void {
+                                                                        parent.appendChild(this.div)
+                                                                    }
+                                                                    unmount(parent: HTMLElement): void {
+                                                                        parent.removeChild(this.div)
+                                                                    }
+
+                                                                    getStreamRect(): DOMRect {
+                                                                        // The bounding rect of the videoElement or canvasElement can be bigger than the actual video
+                                                                        // -> We need to correct for this when sending positions, else positions are wrong
+                                                                        return this.stream.getVideoRenderer()?.getStreamRect() ?? new DOMRect()
+                                                                    }
+                                                                    getStream(): Stream | null {
+                                                                        return this.stream
+                                                                    }
 }
 
 class ConnectionInfoModal implements Modal<void> {
@@ -871,111 +872,111 @@ class ConnectionInfoModal implements Modal<void> {
     private root = document.createElement("div")
 
     private textTy: LogMessageType | null = null
-    private text = document.createElement("p")
+        private text = document.createElement("p")
 
-    private options = document.createElement("div")
-    private debugDetailButton = document.createElement("button")
-    private closeButton = document.createElement("button")
+        private options = document.createElement("div")
+        private debugDetailButton = document.createElement("button")
+        private closeButton = document.createElement("button")
 
-    private debugDetail = "" // We store this seperate because line breaks don't work when the element is not mounted on the dom
-    private debugDetailDisplay = document.createElement("div")
+        private debugDetail = "" // We store this seperate because line breaks don't work when the element is not mounted on the dom
+        private debugDetailDisplay = document.createElement("div")
 
-    constructor() {
-        this.root.classList.add("modal-video-connect")
+        constructor() {
+            this.root.classList.add("modal-video-connect")
 
-        this.text.innerText = I.stream.connecting
-        this.root.appendChild(this.text)
+            this.text.innerText = I.stream.connecting
+            this.root.appendChild(this.text)
 
-        this.root.appendChild(this.options)
-        this.options.classList.add("modal-video-connect-options")
+            this.root.appendChild(this.options)
+            this.options.classList.add("modal-video-connect-options")
 
-        this.debugDetailButton.innerText = I.stream.showLogs
-        this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
-        this.options.appendChild(this.debugDetailButton)
-
-        this.closeButton.innerText = I.stream.close
-        this.closeButton.addEventListener("click", this.onClose.bind(this))
-        this.options.appendChild(this.closeButton)
-
-        this.debugDetailDisplay.classList.add("textlike")
-        this.debugDetailDisplay.classList.add("modal-video-connect-debug")
-    }
-
-    private onDebugDetailClick() {
-        let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
-
-        if (debugDetailCurrentlyShown) {
             this.debugDetailButton.innerText = I.stream.showLogs
-            this.root.removeChild(this.debugDetailDisplay)
-        } else {
-            this.debugDetailButton.innerText = I.stream.hideLogs
-            this.root.appendChild(this.debugDetailDisplay)
+            this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
+            this.options.appendChild(this.debugDetailButton)
+
+            this.closeButton.innerText = I.stream.close
+            this.closeButton.addEventListener("click", this.onClose.bind(this))
+            this.options.appendChild(this.closeButton)
+
+            this.debugDetailDisplay.classList.add("textlike")
+            this.debugDetailDisplay.classList.add("modal-video-connect-debug")
+        }
+
+        private onDebugDetailClick() {
+            let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
+
+            if (debugDetailCurrentlyShown) {
+                this.debugDetailButton.innerText = I.stream.showLogs
+                this.root.removeChild(this.debugDetailDisplay)
+            } else {
+                this.debugDetailButton.innerText = I.stream.hideLogs
+                this.root.appendChild(this.debugDetailDisplay)
+                this.debugDetailDisplay.innerText = this.debugDetail
+            }
+        }
+
+        private debugLog(line: string) {
+            this.debugDetail += `${line}\n`
             this.debugDetailDisplay.innerText = this.debugDetail
+            console.info(`[Stream]: ${line}`)
         }
-    }
 
-    private debugLog(line: string) {
-        this.debugDetail += `${line}\n`
-        this.debugDetailDisplay.innerText = this.debugDetail
-        console.info(`[Stream]: ${line}`)
-    }
+        onInfo(event: InfoEvent) {
+            const data = event.detail
 
-    onInfo(event: InfoEvent) {
-        const data = event.detail
+            if (data.type == "connectionComplete") {
+                const text = I.stream.connectionComplete
+                this.text.innerText = text
+                this.debugLog(text)
+            } else if (data.type == "videoReady") {
 
-        if (data.type == "connectionComplete") {
-            const text = I.stream.connectionComplete
-            this.text.innerText = text
-            this.debugLog(text)
-        } else if (data.type == "videoReady") {
+                this.eventTarget.dispatchEvent(new Event("ml-connected"))
+            } else if (data.type == "addDebugLine") {
+                const message = data.line.trim()
+                if (message) {
+                    this.debugLog(message)
 
-            this.eventTarget.dispatchEvent(new Event("ml-connected"))
-        } else if (data.type == "addDebugLine") {
-            const message = data.line.trim()
-            if (message) {
-                this.debugLog(message)
-
-                if (!this.textTy) {
-                    this.text.innerText = message
-                    this.textTy = data.additional?.type ?? null
-                } else if (data.additional?.type == "fatalDescription" || data.additional?.type == "ifErrorDescription") {
-                    if (this.text.innerText) {
-                        this.text.innerText += "\n" + message
-                    } else {
+                    if (!this.textTy) {
                         this.text.innerText = message
+                        this.textTy = data.additional?.type ?? null
+                    } else if (data.additional?.type == "fatalDescription" || data.additional?.type == "ifErrorDescription") {
+                        if (this.text.innerText) {
+                            this.text.innerText += "\n" + message
+                        } else {
+                            this.text.innerText = message
+                        }
+                        this.textTy = data.additional.type
                     }
-                    this.textTy = data.additional.type
                 }
-            }
 
-            if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
-                showModal(this)
-            } else if (data.additional?.type == "informError") {
-                showNotification(data.line)
+                if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
+                    showModal(this)
+                } else if (data.additional?.type == "informError") {
+                    showNotification(data.line)
+                }
+            } else if (data.type == "serverMessage") {
+                const text = I.stream.serverMessage(data.message)
+                this.text.innerText = text
+                this.debugLog(text)
             }
-        } else if (data.type == "serverMessage") {
-            const text = I.stream.serverMessage(data.message)
-            this.text.innerText = text
-            this.debugLog(text)
         }
-    }
 
-    onClose() {
-        showModal(null)
-    }
+        onClose() {
+            showModal(null)
+        }
 
-    onFinish(abort: AbortSignal): Promise<void> {
-        return new Promise((resolve, reject) => {
-            this.eventTarget.addEventListener("ml-connected", () => resolve(), { once: true, signal: abort })
-        })
-    }
+        onFinish(abort: AbortSignal): Promise<void> {
+            return new Promise((resolve, reject) => {
+                this.eventTarget.addEventListener("ml-connected", () => resolve(), { once: true, signal: abort })
+            })
+        }
 
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.root)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.root)
-    }
+        mount(parent: HTMLElement): void {
+            parent.appendChild(this.root)
+        }
+        unmount(parent: HTMLElement): void {
+            parent.removeChild(this.root)
+        }
 }
 
 class AutoFullscreenModal implements Component, Modal<void> {
@@ -985,620 +986,730 @@ class AutoFullscreenModal implements Component, Modal<void> {
     private cancelButton = document.createElement("button")
     private onConfirm: () => Promise<void>
 
-    constructor(onConfirm: () => Promise<void>) {
-        this.onConfirm = onConfirm
-        this.message.innerText = I.stream.autoFullscreenPrompt
-        this.okButton.innerText = I.modal.ok
-        this.cancelButton.innerText = I.modal.cancel
-    }
+        constructor(onConfirm: () => Promise<void>) {
+            this.onConfirm = onConfirm
+            this.message.innerText = I.stream.autoFullscreenPrompt
+            this.okButton.innerText = I.modal.ok
+            this.cancelButton.innerText = I.modal.cancel
+        }
 
-    mount(parent: HTMLElement): void {
-        this.root.appendChild(this.message)
-        this.root.appendChild(this.okButton)
-        this.root.appendChild(this.cancelButton)
-        parent.appendChild(this.root)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.root)
-    }
+        mount(parent: HTMLElement): void {
+            this.root.appendChild(this.message)
+            this.root.appendChild(this.okButton)
+            this.root.appendChild(this.cancelButton)
+            parent.appendChild(this.root)
+        }
+        unmount(parent: HTMLElement): void {
+            parent.removeChild(this.root)
+        }
 
-    onFinish(abort: AbortSignal): Promise<void> {
-        return new Promise((resolve) => {
-            this.okButton.addEventListener("click", async () => {
-                await this.onConfirm()
-                resolve()
-            }, { once: true, signal: abort })
+        onFinish(abort: AbortSignal): Promise<void> {
+            return new Promise((resolve) => {
+                this.okButton.addEventListener("click", async () => {
+                    await this.onConfirm()
+                    resolve()
+                }, { once: true, signal: abort })
 
-            this.cancelButton.addEventListener("click", () => {
-                resolve()
-            }, { once: true, signal: abort })
-        })
-    }
+                this.cancelButton.addEventListener("click", () => {
+                    resolve()
+                }, { once: true, signal: abort })
+            })
+        }
 }
 
 class ViewerSidebar implements Component, Sidebar {
     private app: ViewerApp
 
-    private gamepadButton = document.createElement("button");
+        private gamepadButton = document.createElement("button");
+        private gamepadMenu = document.createElement("div");
+        private gamepadMenuOpen = false;
+        private gamepadOverlayVisible = true;
+        private gamepadPluggedIn = true;
+        private hapticsEnabled = true;
+        private analogTriggers = true;
+        private motionEnabled = false;
 
-    private div = document.createElement("div")
+        private div = document.createElement("div")
 
-    private buttonDiv = document.createElement("div")
+        private buttonDiv = document.createElement("div")
 
-    private sendKeycodeButton = document.createElement("button")
+        private sendKeycodeButton = document.createElement("button")
 
-    private keyboardButton = document.createElement("button")
-    private floatingKeyboardButton = document.createElement("button")
-    private screenKeyboard = new ScreenKeyboard()
+        private keyboardButton = document.createElement("button")
+        private floatingKeyboardButton = document.createElement("button")
+        private screenKeyboard = new ScreenKeyboard()
 
-    private lockMouseButton = document.createElement("button")
-    private fullscreenButton = document.createElement("button")
+        private lockMouseButton = document.createElement("button")
+        private fullscreenButton = document.createElement("button")
 
-    private statsButton = document.createElement("button")
-    private exitStreamButton = document.createElement("button")
+        private statsButton = document.createElement("button")
+        private exitStreamButton = document.createElement("button")
 
-    private mouseMode: SelectComponent
-    private touchMode: SelectComponent
+        private mouseMode: SelectComponent
+            private touchMode: SelectComponent
 
-    // Class-level state for sticky modifiers to ensure reliable resets
-    private stickyModifiers: Record<number, boolean> = {
-        0x11: false, // Ctrl
-        0x12: false, // Alt
-        0x10: false, // Shift
-        0x5B: false  // Win
-    };
-    private modifierButtons: Record<number, HTMLElement> = {};
+                // Class-level state for sticky modifiers to ensure reliable resets
+                private stickyModifiers: Record<number, boolean> = {
+                    0x11: false, // Ctrl
+                    0x12: false, // Alt
+                    0x10: false, // Shift
+                    0x5B: false  // Win
+                };
+                private modifierButtons: Record<number, HTMLElement> = {};
 
-    private resetStickyModifiers() {
-        const input = this.app.getStream()?.getInput();
-        if (!input) return;
+                private resetStickyModifiers() {
+                    const input = this.app.getStream()?.getInput();
+                    if (!input) return;
 
-        [0x11, 0x12, 0x10, 0x5B].forEach(code => {
-            if (this.stickyModifiers[code]) {
-                input.sendKey(false, code, 0); // Release via class-level input access
-                this.stickyModifiers[code] = false;
-                
-                // Visual reset
-                if (this.modifierButtons[code]) {
-                    this.modifierButtons[code].style.background = "rgba(55, 55, 55, 0.4)";
-                }
-            }
-        });
-    }
+                    [0x11, 0x12, 0x10, 0x5B].forEach(code => {
+                        if (this.stickyModifiers[code]) {
+                            input.sendKey(false, code, 0); // Release via class-level input access
+                            this.stickyModifiers[code] = false;
 
-    constructor(app: ViewerApp) {
-        this.app = app
-
-        // Configure divs
-        this.div.classList.add("sidebar-stream")
-
-        this.buttonDiv.classList.add("sidebar-stream-buttons")
-        this.div.appendChild(this.buttonDiv)
-
-        // Add these two buttons to your buttonDiv
-        const switchLeftButton = document.createElement("button");
-        switchLeftButton.innerText = "Prev Monitor";
-        switchLeftButton.addEventListener("click", () => this.sendMonitorShortcut(0x70)); // VK_F1
-        this.buttonDiv.appendChild(switchLeftButton);
-
-        const switchRightButton = document.createElement("button");
-        switchRightButton.innerText = "Next Monitor";
-        switchRightButton.addEventListener("click", () => this.sendMonitorShortcut(0x71)); // VK_F2
-        this.buttonDiv.appendChild(switchRightButton);
-
-
-        // --- VIRTUAL GAMEPAD BUTTON (First button) ---
-        this.gamepadButton = document.createElement("button");
-        this.gamepadButton.innerText = "Gamepad";
-        this.gamepadButton.id = "vpad-btn";
-        this.gamepadButton.title = "Virtual Gamepad (Long press to unplug)";
-
-        let gamepadPressStartTime = 0;
-        const GAMEPAD_LONG_PRESS_DURATION = 550;
-
-        const handleGamepadPointerDown = (e: PointerEvent) => {
-            if (e.button !== undefined && e.button !== 0) return;
-            gamepadPressStartTime = Date.now();
-            this.gamepadButton.style.transition = "background-color 0.15s";
-            this.gamepadButton.style.backgroundColor = "rgba(255, 255, 255, 0.25)";
-        };
-
-        const handleGamepadPointerUp = (e: PointerEvent) => {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-
-            const duration = Date.now() - gamepadPressStartTime;
-            this.gamepadButton.style.backgroundColor = "";
-
-            if (duration >= GAMEPAD_LONG_PRESS_DURATION) {
-                window.unplugVirtualGamepad?.(this.gamepadButton);
-            } else {
-                window.toggleVirtualGamepad?.(this.gamepadButton);
-            }
-        };
-
-        this.gamepadButton.addEventListener("pointerdown", handleGamepadPointerDown, { passive: false });
-        this.gamepadButton.addEventListener("pointerup", handleGamepadPointerUp, { passive: false });
-        this.gamepadButton.addEventListener("pointerleave", () => {
-            this.gamepadButton.style.backgroundColor = "";
-        });
-        this.gamepadButton.addEventListener("pointercancel", () => {
-            this.gamepadButton.style.backgroundColor = "";
-        });
-
-        this.gamepadButton.addEventListener("contextmenu", e => e.preventDefault());
-        this.gamepadButton.addEventListener("click", e => e.preventDefault());
-
-        // Insert as the very first button
-        this.buttonDiv.appendChild(this.gamepadButton);
-
-        // Send keycode
-        this.sendKeycodeButton.innerText = I.stream.sendKeycode
-        this.sendKeycodeButton.addEventListener("click", async () => {
-            const key = await showModal(new SendKeycodeModal())
-
-            if (key == null) {
-                return
-            }
-
-            this.app.getStream()?.getInput().sendKey(true, key, 0)
-            this.app.getStream()?.getInput().sendKey(false, key, 0)
-        })
-        this.buttonDiv.appendChild(this.sendKeycodeButton)
-
-        const clipboardButton = document.createElement("button")
-        clipboardButton.innerText = "Clipboard"
-        clipboardButton.addEventListener("click", async () => {
-            setSidebarExtended(false);
-
-            const textToSend = await showModal(new ClipboardModal());
-
-            if (textToSend) {
-                const stream = this.app.getStream()?.getInput();
-                if (!stream) return;
-
-                // Use a conservative chunk size (e.g., 128) to avoid UTF-8 buffer overflow
-                const CHUNK_SIZE = 128;
-
-                for (let i = 0; i < textToSend.length; i += CHUNK_SIZE) {
-                    const chunk = textToSend.slice(i, i + CHUNK_SIZE);
-                    stream.sendText(chunk);
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                            // Visual reset
+                            if (this.modifierButtons[code]) {
+                                this.modifierButtons[code].style.background = "rgba(55, 55, 55, 0.4)";
+                            }
+                        }
+                    });
                 }
 
-                console.log("📤 Transmitted via native sendText.");
-            }
-        });
-        this.buttonDiv.appendChild(clipboardButton)
-
-        // Pointer Lock
-        this.lockMouseButton.innerText = I.stream.lockMouse
-        this.lockMouseButton.addEventListener("click", async () => {
-            await this.app.requestPointerLock(true)
-        })
-        this.buttonDiv.appendChild(this.lockMouseButton)
-
-        // --- VISUAL ON-SCREEN KEYBOARD ENGINE ---
-        const visualKbdOverlay = document.createElement("div");
-        visualKbdOverlay.id = "visual-kbd-overlay";
-        visualKbdOverlay.style.pointerEvents = "none";
-        visualKbdOverlay.style.display = "none"; // Hidden by default
-
-        // Handle raw key transmissions
-        const sendRawKey = (isDown: boolean, vkCode: number) => {
-            const input = this.app.getStream()?.getInput();
-            if (input) {
-                input.sendKey(isDown, vkCode, 0);
-            }
-        };
-
-        // Key Layout Mapping Matrix [Label, Virtual Key Code, Flex-Grow Weight (optional)]
-        const kbdLayout = [
-            [ ["ESC", 0x1B], ["F1", 0x70], ["F2", 0x71], ["F3", 0x72], ["F4", 0x73], ["F5", 0x74], ["F6", 0x75], ["F7", 0x76], ["F8", 0x77], ["F9", 0x78], ["F10", 0x79], ["F11", 0x7A], ["F12", 0x7B], ["Ins", 0x2D], ["Del", 0x2E] ],
-            [ ["~ `", 0xC0], ["1", 0x31], ["2", 0x32], ["3", 0x33], ["4", 0x34], ["5", 0x35], ["6", 0x36], ["7", 0x37], ["8", 0x38], ["9", 0x39], ["0", 0x30], ["-_", 0xBD], ["+=", 0xBB], ["Back", 0x08, 1.5] ],
-            [ ["Tab", 0x09, 1.5], ["Q", 0x51], ["W", 0x57], ["E", 0x45], ["R", 0x52], ["T", 0x54], ["Y", 0x59], ["U", 0x55], ["I", 0x49], ["O", 0x4F], ["P", 0x50], ["{[", 0xDB], ["}]", 0xDD], ["| \\", 0xDC] ],
-            [ ["Caps", 0x14, 1.75], ["A", 0x41], ["S", 0x53], ["D", 0x44], ["F", 0x46], ["G", 0x47], ["H", 0x48], ["J", 0x4A], ["K", 0x4B], ["L", 0x4C], [";:", 0xBA], ["'\"", 0xDE], ["Enter", 0x0D, 2.25] ],
-            [ ["Shift", 0x10, 2.25], ["Z", 0x5A], ["X", 0x58], ["C", 0x43], ["V", 0x56], ["B", 0x42], ["N", 0x4E], ["M", 0x4D], ["<,", 0xBC], [">.", 0xBE], ["?/", 0xBF], ["↑", 0x26], ["Hide\nKBD", -1, 1.25] ],
-            [ ["Ctrl", 0x11, 1.5], ["Win", 0x5B, 1.25], ["Alt", 0x12, 1.25], ["___", 0x20, 5], ["Home", 0x24], ["End", 0x23], ["PgUp", 0x21], ["PgDn", 0x22], ["←", 0x25], ["↓", 0x28], ["→", 0x27] ]
-        ];
-
-        // Generate the visual markup dynamically
-        // Generate the visual markup dynamically
-        kbdLayout.forEach(row => {
-            const rowEl = document.createElement("div");
-            rowEl.className = "vkbd-row";
-            row.forEach(([label, code, weight]) => {
-                const btn = document.createElement("div");
-                btn.className = "vkbd-key";
-                btn.innerText = label.toString();
-                if (weight) {
-                    btn.style.flexGrow = weight.toString();
+                private toggleGamepadMenu(open: boolean) {
+                    this.gamepadMenuOpen = open;
+                    this.gamepadMenu.style.display = open ? "block" : "none";
+                    if (open) {
+                        this.refreshGamepadStatus();
+                    }
                 }
 
-                const isModifier = [0x11, 0x12, 0x10, 0x5B].indexOf(code as number) !== -1;
-                
-                if (isModifier) {
-                    this.modifierButtons[code as number] = btn;
+                private refreshGamepadStatus() {
+                    const overlay = document.getElementById("controller-overlay");
+                    this.gamepadOverlayVisible = overlay?.style.display === "block";
+                    this.gamepadPluggedIn = !!(window as any).vGamepad?.connected;
                 }
 
-                let pressTimer: number | undefined;
-                let isLongPressed = false;
-                let wasAlreadySticky = false;
+                constructor(app: ViewerApp) {
+                    this.app = app
 
-                const handleKeyStart = (e: PointerEvent) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    btn.classList.add("active");
-                    btn.setPointerCapture(e.pointerId);
-                    
-                    isLongPressed = false;
+                    // Configure divs
+                    this.div.classList.add("sidebar-stream")
 
-                    if (isModifier) {
-                        wasAlreadySticky = this.stickyModifiers[code as number];
-                        
-                        if (wasAlreadySticky) {
-                            // If it's already lit up, ANY tap instantly disables it.
-                            this.stickyModifiers[code as number] = false;
-                            btn.style.background = "rgba(55, 55, 55, 0.4)";
-                            sendRawKey(false, code as number);
+                    this.buttonDiv.classList.add("sidebar-stream-buttons")
+                    this.div.appendChild(this.buttonDiv)
+
+                    // --- VIRTUAL GAMEPAD BUTTON (First button) ---
+                    this.gamepadMenu.classList.add("sidebar-gamepad-menu");
+                    Object.assign(this.gamepadMenu.style, {
+                        display: "none",
+                        width: "100%",
+                        padding: "14px",
+                        marginTop: "14px",
+                        background: "rgba(10, 10, 10, 0.95)",
+                        border: "1px solid rgba(255, 255, 255, 0.12)",
+                        borderRadius: "14px",
+                        boxShadow: "0 18px 40px rgba(0, 0, 0, 0.35)",
+                        color: "white",
+                        fontFamily: "sans-serif",
+                        touchAction: "manipulation",
+                        zIndex: "1",
+                    });
+
+                    const makeMenuButton = (text: string) => {
+                        const button = document.createElement("button");
+                        button.innerText = text;
+                        button.style.width = "100%";
+                        button.style.padding = "10px 12px";
+                        button.style.margin = "6px 0";
+                        button.style.background = "rgba(255,255,255,0.08)";
+                        button.style.border = "1px solid rgba(255,255,255,0.14)";
+                        button.style.borderRadius = "10px";
+                        button.style.color = "white";
+                        button.style.cursor = "pointer";
+                        button.style.fontWeight = "600";
+                        button.style.textAlign = "left";
+                        return button;
+                    };
+
+                    const menuHeader = document.createElement("div");
+                    menuHeader.innerText = "Gamepad Menu";
+                    menuHeader.style.fontSize = "1rem";
+                    menuHeader.style.marginBottom = "12px";
+                    menuHeader.style.fontWeight = "700";
+                    this.gamepadMenu.appendChild(menuHeader);
+
+                    const statusRow = document.createElement("div");
+                    statusRow.style.display = "grid";
+                    statusRow.style.gridTemplateColumns = "1fr 1fr";
+                    statusRow.style.gap = "8px";
+
+                    const pluggedLabel = document.createElement("div");
+                    pluggedLabel.innerText = "Plugged In";
+                    pluggedLabel.style.opacity = "0.8";
+                    const visibleLabel = document.createElement("div");
+                    visibleLabel.innerText = "Gamepad Visible";
+                    visibleLabel.style.opacity = "0.8";
+                    statusRow.appendChild(pluggedLabel);
+                    statusRow.appendChild(visibleLabel);
+                    this.gamepadMenu.appendChild(statusRow);
+
+                    const updateGamepadStatus = () => {
+                        pluggedLabel.innerText = (window as any).vGamepad?.connected ? "Plugged In" : "Unplugged";
+                        visibleLabel.innerText = (document.getElementById("controller-overlay")?.style.display === "block") ? "Gamepad Visible" : "Gamepad Hidden";
+                        this.gamepadOverlayVisible = document.getElementById("controller-overlay")?.style.display === "block";
+                        this.gamepadPluggedIn = !!(window as any).vGamepad?.connected;
+                    };
+
+                    const togglePluggedButton = makeMenuButton("Toggle Plugged In");
+                    togglePluggedButton.addEventListener("click", () => {
+                        if (window.vGamepad && window.vGamepad.connected) {
+                            window.unplugVirtualGamepad?.(this.gamepadButton);
                         } else {
-                            // It is not lit up. Start timer to see if they hold it.
-                            pressTimer = window.setTimeout(() => {
-                                isLongPressed = true;
-                                this.stickyModifiers[code as number] = true;
-                                btn.style.background = "rgba(255, 255, 255, 0.6)";
-                                sendRawKey(true, code as number);
-                            }, 500);
+                            window.toggleVirtualGamepad?.(this.gamepadButton);
                         }
-                    } else if (code === -1) {
-                        this.resetStickyModifiers();
-                        visualKbdOverlay.style.display = "none";
-                        visualKbdOverlay.style.pointerEvents = "none";
-                    } else {
-                        // Standard keys fire immediately
-                        sendRawKey(true, code as number);
-                    }
-                };
+                        updateGamepadStatus();
+                    });
+                    this.gamepadMenu.appendChild(togglePluggedButton);
 
-                const handleKeyEnd = (e: PointerEvent) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    clearTimeout(pressTimer);
-                    
-                    try {
-                        if (btn.hasPointerCapture(e.pointerId)) {
-                            btn.releasePointerCapture(e.pointerId);
+                    const toggleVisibleButton = makeMenuButton("Toggle Visibility");
+                    toggleVisibleButton.addEventListener("click", () => {
+                        const overlay = document.getElementById("controller-overlay");
+                        if (overlay) {
+                            overlay.style.display = overlay.style.display === "block" ? "none" : "block";
                         }
-                    } catch(err) {}
+                        updateGamepadStatus();
+                    });
+                    this.gamepadMenu.appendChild(toggleVisibleButton);
 
-                    if (isModifier) {
-                        if (!wasAlreadySticky && !isLongPressed) {
-                            // It was a quick tap on an unlit modifier. Pulse it.
-                            sendRawKey(true, code as number);
-                            setTimeout(() => sendRawKey(false, code as number), 100);
+                    const analogButton = makeMenuButton("Use Analog Triggers");
+                    analogButton.addEventListener("click", () => {
+                        this.analogTriggers = !this.analogTriggers;
+                        analogButton.innerText = this.analogTriggers ? "Triggers: Analog" : "Triggers: Digital";
+                        window.vpadConfig = window.vpadConfig || {};
+                        window.vpadConfig.analogTriggers = this.analogTriggers;
+                    });
+                    analogButton.innerText = this.analogTriggers ? "Triggers: Analog" : "Triggers: Digital";
+                    this.gamepadMenu.appendChild(analogButton);
+
+                    const hapticsButton = makeMenuButton("Haptics: On");
+                    hapticsButton.addEventListener("click", () => {
+                        this.hapticsEnabled = !this.hapticsEnabled;
+                        hapticsButton.innerText = this.hapticsEnabled ? "Haptics: On" : "Haptics: Off";
+                        window.vpadConfig = window.vpadConfig || {};
+                        window.vpadConfig.hapticsEnabled = this.hapticsEnabled;
+                    });
+                    this.gamepadMenu.appendChild(hapticsButton);
+
+                    const motionButton = makeMenuButton("Motion: On");
+                    motionButton.addEventListener("click", () => {
+                        this.motionEnabled = !this.motionEnabled;
+                        motionButton.innerText = this.motionEnabled ? "Motion: On" : "Motion: Off";
+                        window.vpadConfig = window.vpadConfig || {};
+                        window.vpadConfig.motionEnabled = this.motionEnabled;
+                        (window as any).setMotionControlsEnabled?.(this.motionEnabled);
+                    });
+                    this.gamepadMenu.appendChild(motionButton);
+
+                    const editLayoutMenuButton = makeMenuButton("Edit Gamepad Layout");
+                    editLayoutMenuButton.addEventListener("click", () => {
+                        this.toggleGamepadMenu(false);
+                        if ((window as any).toggleGamepadEditMode) {
+                            (window as any).toggleGamepadEditMode(true);
                         }
-                        btn.classList.remove("active");
-                    } else {
-                        btn.classList.remove("active");
-                        if (code !== -1) {
-                            sendRawKey(false, code as number);
+                    });
+                    this.gamepadMenu.appendChild(editLayoutMenuButton);
+
+                    const closeMenuButton = makeMenuButton("Close Gamepad Menu");
+                    closeMenuButton.style.background = "rgba(255, 255, 255, 0.12)";
+                    closeMenuButton.addEventListener("click", () => this.toggleGamepadMenu(false));
+                    this.gamepadMenu.appendChild(closeMenuButton);
+
+                    this.div.appendChild(this.gamepadMenu);
+                    this.gamepadButton = document.createElement("button");
+                    this.gamepadButton.innerText = "Gamepad";
+                    this.gamepadButton.id = "vpad-btn";
+                    this.gamepadButton.title = "Virtual Gamepad (Long press to unplug)";
+
+                    let gamepadPressStartTime = 0;
+                    const GAMEPAD_LONG_PRESS_DURATION = 550;
+
+                    const handleGamepadPointerDown = (e: PointerEvent) => {
+                        if (e.button !== undefined && e.button !== 0) return;
+                        gamepadPressStartTime = Date.now();
+                        this.gamepadButton.style.transition = "background-color 0.15s";
+                        this.gamepadButton.style.backgroundColor = "rgba(255, 255, 255, 0.25)";
+                    };
+
+                    const handleGamepadPointerUp = (e: PointerEvent) => {
+                        e.preventDefault();
+                        e.stopImmediatePropagation();
+
+                        const duration = Date.now() - gamepadPressStartTime;
+                        this.gamepadButton.style.backgroundColor = "";
+
+                        if (duration >= GAMEPAD_LONG_PRESS_DURATION) {
+                            window.unplugVirtualGamepad?.(this.gamepadButton);
+                        } else {
+                            window.toggleVirtualGamepad?.(this.gamepadButton);
                         }
-                    }
-                };
+                    };
 
-                btn.addEventListener("pointerdown", handleKeyStart);
-                btn.addEventListener("pointerup", handleKeyEnd);
-                btn.addEventListener("pointercancel", handleKeyEnd);
+                    this.gamepadButton.addEventListener("pointerdown", handleGamepadPointerDown, { passive: false });
+                    this.gamepadButton.addEventListener("pointerup", handleGamepadPointerUp, { passive: false });
+                    this.gamepadButton.addEventListener("pointerleave", () => {
+                        this.gamepadButton.style.backgroundColor = "";
+                    });
+                    this.gamepadButton.addEventListener("pointercancel", () => {
+                        this.gamepadButton.style.backgroundColor = "";
+                    });
 
-                rowEl.appendChild(btn);
-            });
-            visualKbdOverlay.appendChild(rowEl);
-        });
+                    this.gamepadButton.addEventListener("contextmenu", e => e.preventDefault());
+                    this.gamepadButton.addEventListener("click", (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        this.toggleGamepadMenu(!this.gamepadMenuOpen);
+                    });
 
-        // --- THE LEAK BLOCKER ---
-        const blockEvent = (e: Event) => e.stopPropagation();
-        const eventsToBlock = [
-            "pointerdown", "pointerup", "pointermove", "pointercancel",
-            "touchstart", "touchend", "touchmove", "touchcancel",
-            "mousedown", "mouseup", "mousemove", "contextmenu"
-        ];
-        eventsToBlock.forEach(ev => {
-            visualKbdOverlay.addEventListener(ev, blockEvent, { passive: false });
-        });
+                    // Insert as the very first button
+                    this.buttonDiv.appendChild(this.gamepadButton);
 
-        (document.getElementById("root") || document.body).appendChild(visualKbdOverlay);
+                    // Send keycode
+                    this.sendKeycodeButton.innerText = I.stream.sendKeycode
+                    this.sendKeycodeButton.addEventListener("click", async () => {
+                        const key = await showModal(new SendKeycodeModal())
 
-        // --- Pop up keyboard with Long Press support ---
-        this.keyboardButton.innerText = I.stream.keyboard;
+                        if (key == null) {
+                            return
+                        }
 
-        let kbdPressTimer: number | undefined;
-        let kbdIsLongPress = false;
+                        this.app.getStream()?.getInput().sendKey(true, key, 0)
+                        this.app.getStream()?.getInput().sendKey(false, key, 0)
+                    })
+                    this.buttonDiv.appendChild(this.sendKeycodeButton)
 
-        this.keyboardButton.addEventListener("pointerdown", () => {
-            kbdIsLongPress = false;
-            clearTimeout(kbdPressTimer);
+                    const clipboardButton = document.createElement("button")
+                    clipboardButton.innerText = "Clipboard"
+                    clipboardButton.addEventListener("click", async () => {
+                        setSidebarExtended(false);
 
-            kbdPressTimer = window.setTimeout(() => {
-                kbdIsLongPress = true;
-                setSidebarExtended(false);
-                if (visualKbdOverlay) {
-                    visualKbdOverlay.style.display = "flex";
-                    visualKbdOverlay.style.pointerEvents = "auto";
+                        const textToSend = await showModal(new ClipboardModal());
+
+                        if (textToSend) {
+                            const stream = this.app.getStream()?.getInput();
+                            if (!stream) return;
+
+                            // Use a conservative chunk size (e.g., 128) to avoid UTF-8 buffer overflow
+                            const CHUNK_SIZE = 128;
+
+                            for (let i = 0; i < textToSend.length; i += CHUNK_SIZE) {
+                                const chunk = textToSend.slice(i, i + CHUNK_SIZE);
+                                stream.sendText(chunk);
+                                await new Promise(resolve => setTimeout(resolve, 300));
+                            }
+
+                            console.log("📤 Transmitted via native sendText.");
+                        }
+                    });
+                    this.buttonDiv.appendChild(clipboardButton)
+
+                    // Pointer Lock
+                    this.lockMouseButton.innerText = I.stream.lockMouse
+                    this.lockMouseButton.addEventListener("click", async () => {
+                        await this.app.requestPointerLock(true)
+                    })
+                    this.buttonDiv.appendChild(this.lockMouseButton)
+
+                    // --- VISUAL ON-SCREEN KEYBOARD ENGINE ---
+                    const visualKbdOverlay = document.createElement("div");
+                    visualKbdOverlay.id = "visual-kbd-overlay";
+                    visualKbdOverlay.style.pointerEvents = "none";
+                    visualKbdOverlay.style.display = "none"; // Hidden by default
+
+                    // Handle raw key transmissions
+                    const sendRawKey = (isDown: boolean, vkCode: number) => {
+                        const input = this.app.getStream()?.getInput();
+                        if (input) {
+                            input.sendKey(isDown, vkCode, 0);
+                        }
+                    };
+
+                    // Key Layout Mapping Matrix [Label, Virtual Key Code, Flex-Grow Weight (optional)]
+                    const kbdLayout = [
+                        [ ["ESC", 0x1B], ["F1", 0x70], ["F2", 0x71], ["F3", 0x72], ["F4", 0x73], ["F5", 0x74], ["F6", 0x75], ["F7", 0x76], ["F8", 0x77], ["F9", 0x78], ["F10", 0x79], ["F11", 0x7A], ["F12", 0x7B], ["Ins", 0x2D], ["Del", 0x2E] ],
+                        [ ["~ `", 0xC0], ["1", 0x31], ["2", 0x32], ["3", 0x33], ["4", 0x34], ["5", 0x35], ["6", 0x36], ["7", 0x37], ["8", 0x38], ["9", 0x39], ["0", 0x30], ["-_", 0xBD], ["+=", 0xBB], ["Back", 0x08, 1.5] ],
+                        [ ["Tab", 0x09, 1.5], ["Q", 0x51], ["W", 0x57], ["E", 0x45], ["R", 0x52], ["T", 0x54], ["Y", 0x59], ["U", 0x55], ["I", 0x49], ["O", 0x4F], ["P", 0x50], ["{[", 0xDB], ["}]", 0xDD], ["| \\", 0xDC] ],
+                        [ ["Caps", 0x14, 1.75], ["A", 0x41], ["S", 0x53], ["D", 0x44], ["F", 0x46], ["G", 0x47], ["H", 0x48], ["J", 0x4A], ["K", 0x4B], ["L", 0x4C], [";:", 0xBA], ["'\"", 0xDE], ["Enter", 0x0D, 2.25] ],
+                        [ ["Shift", 0x10, 2.25], ["Z", 0x5A], ["X", 0x58], ["C", 0x43], ["V", 0x56], ["B", 0x42], ["N", 0x4E], ["M", 0x4D], ["<,", 0xBC], [">.", 0xBE], ["?/", 0xBF], ["↑", 0x26], ["Hide\nKBD", -1, 1.25] ],
+                        [ ["Ctrl", 0x11, 1.5], ["Win", 0x5B, 1.25], ["Alt", 0x12, 1.25], ["___", 0x20, 5], ["Home", 0x24], ["End", 0x23], ["PgUp", 0x21], ["PgDn", 0x22], ["←", 0x25], ["↓", 0x28], ["→", 0x27] ]
+                    ];
+
+                    // Generate the visual markup dynamically
+                    // Generate the visual markup dynamically
+                    kbdLayout.forEach(row => {
+                        const rowEl = document.createElement("div");
+                        rowEl.className = "vkbd-row";
+                        row.forEach(([label, code, weight]) => {
+                            const btn = document.createElement("div");
+                            btn.className = "vkbd-key";
+                            btn.innerText = label.toString();
+                            if (weight) {
+                                btn.style.flexGrow = weight.toString();
+                            }
+
+                            const isModifier = [0x11, 0x12, 0x10, 0x5B].indexOf(code as number) !== -1;
+
+                            if (isModifier) {
+                                this.modifierButtons[code as number] = btn;
+                            }
+
+                            let pressTimer: number | undefined;
+                            let isLongPressed = false;
+                            let wasAlreadySticky = false;
+
+                            const handleKeyStart = (e: PointerEvent) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                btn.classList.add("active");
+                                btn.setPointerCapture(e.pointerId);
+
+                                isLongPressed = false;
+
+                                if (isModifier) {
+                                    wasAlreadySticky = this.stickyModifiers[code as number];
+
+                                    if (wasAlreadySticky) {
+                                        // If it's already lit up, ANY tap instantly disables it.
+                                        this.stickyModifiers[code as number] = false;
+                                        btn.style.background = "rgba(55, 55, 55, 0.4)";
+                                        sendRawKey(false, code as number);
+                                    } else {
+                                        // It is not lit up. Start timer to see if they hold it.
+                                        pressTimer = window.setTimeout(() => {
+                                            isLongPressed = true;
+                                            this.stickyModifiers[code as number] = true;
+                                            btn.style.background = "rgba(255, 255, 255, 0.6)";
+                                            sendRawKey(true, code as number);
+                                        }, 500);
+                                    }
+                                } else if (code === -1) {
+                                    this.resetStickyModifiers();
+                                    visualKbdOverlay.style.display = "none";
+                                    visualKbdOverlay.style.pointerEvents = "none";
+                                } else {
+                                    // Standard keys fire immediately
+                                    sendRawKey(true, code as number);
+                                }
+                            };
+
+                            const handleKeyEnd = (e: PointerEvent) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                clearTimeout(pressTimer);
+
+                                try {
+                                    if (btn.hasPointerCapture(e.pointerId)) {
+                                        btn.releasePointerCapture(e.pointerId);
+                                    }
+                                } catch(err) {}
+
+                                if (isModifier) {
+                                    if (!wasAlreadySticky && !isLongPressed) {
+                                        // It was a quick tap on an unlit modifier. Pulse it.
+                                        sendRawKey(true, code as number);
+                                        setTimeout(() => sendRawKey(false, code as number), 100);
+                                    }
+                                    btn.classList.remove("active");
+                                } else {
+                                    btn.classList.remove("active");
+                                    if (code !== -1) {
+                                        sendRawKey(false, code as number);
+                                    }
+                                }
+                            };
+
+                            btn.addEventListener("pointerdown", handleKeyStart);
+                            btn.addEventListener("pointerup", handleKeyEnd);
+                            btn.addEventListener("pointercancel", handleKeyEnd);
+
+                            rowEl.appendChild(btn);
+                        });
+                        visualKbdOverlay.appendChild(rowEl);
+                    });
+
+                    // --- THE LEAK BLOCKER ---
+                    const blockEvent = (e: Event) => e.stopPropagation();
+                    const eventsToBlock = [
+                        "pointerdown", "pointerup", "pointermove", "pointercancel",
+                        "touchstart", "touchend", "touchmove", "touchcancel",
+                        "mousedown", "mouseup", "mousemove", "contextmenu"
+                    ];
+                    eventsToBlock.forEach(ev => {
+                        visualKbdOverlay.addEventListener(ev, blockEvent, { passive: false });
+                    });
+
+                    (document.getElementById("root") || document.body).appendChild(visualKbdOverlay);
+
+                    // --- Pop up keyboard with Long Press support ---
+                    this.keyboardButton.innerText = I.stream.keyboard;
+
+                    let kbdPressTimer: number | undefined;
+                    let kbdIsLongPress = false;
+
+                    this.keyboardButton.addEventListener("pointerdown", () => {
+                        kbdIsLongPress = false;
+                        clearTimeout(kbdPressTimer);
+
+                        kbdPressTimer = window.setTimeout(() => {
+                            kbdIsLongPress = true;
+                            setSidebarExtended(false);
+                            if (visualKbdOverlay) {
+                                visualKbdOverlay.style.display = "flex";
+                                visualKbdOverlay.style.pointerEvents = "auto";
+                            }
+                        }, 500);
+                    });
+
+                    const cancelKbdTimer = () => {
+                        clearTimeout(kbdPressTimer);
+                    };
+                    this.keyboardButton.addEventListener("pointerup", cancelKbdTimer);
+                    this.keyboardButton.addEventListener("pointercancel", cancelKbdTimer);
+                    this.keyboardButton.addEventListener("pointerleave", cancelKbdTimer);
+
+                    this.keyboardButton.addEventListener("contextmenu", (e) => {
+                        e.preventDefault();
+                    });
+
+                    this.keyboardButton.addEventListener("click", async (e) => {
+                        if (kbdIsLongPress) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        }
+
+                        setSidebarExtended(false);
+                        this.screenKeyboard.show();
+                    });
+
+                    this.buttonDiv.appendChild(this.keyboardButton);
+
+                    // --- Floating Keyboard Button ---
+                    this.floatingKeyboardButton.innerText = "⌨×";
+                    this.floatingKeyboardButton.title = I.stream.hideKeyboard;
+                    this.floatingKeyboardButton.ariaLabel = I.stream.hideKeyboard;
+                    this.floatingKeyboardButton.classList.add("stream-keyboard-floating-button");
+                    this.floatingKeyboardButton.addEventListener("click", event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        this.screenKeyboard.hide();
+
+                        if (visualKbdOverlay) {
+                            this.resetStickyModifiers();
+                            visualKbdOverlay.style.display = "none";
+                            visualKbdOverlay.style.pointerEvents = "none";
+                        }
+                    });
+                    stopPropagationOn(this.floatingKeyboardButton);
+
+                    // --- Standard Keyboard Listeners ---
+                    this.screenKeyboard.addKeyDownListener(this.onKeyDown.bind(this));
+                    this.screenKeyboard.addKeyUpListener(this.onKeyUp.bind(this));
+                    this.screenKeyboard.addTextListener(this.onText.bind(this));
+                    this.screenKeyboard.addKeyboardModeWillChangeListener(this.app.onScreenKeyboardModeWillChange.bind(this.app));
+                    this.screenKeyboard.addKeyboardModeListener(this.onKeyboardModeChange.bind(this));
+                    this.div.appendChild(this.screenKeyboard.getHiddenElement());
+
+
+                    // Fullscreen
+                    this.fullscreenButton.innerText = I.stream.fullscreen
+                    this.fullscreenButton.addEventListener("click", async () => {
+                        if (this.app.isFullscreen()) {
+                            this.app.markManualFullscreenExitRequested()
+                            await this.app.exitFullscreen()
+                        } else {
+                            await this.app.requestFullscreen()
+                        }
+                    })
+                    this.buttonDiv.appendChild(this.fullscreenButton)
+
+                    // Stats
+                    this.statsButton.innerText = I.stream.stats
+                    this.statsButton.addEventListener("click", () => {
+                        const stats = this.app.getStream()?.getStats()
+                        if (stats) {
+                            stats.toggle()
+                        }
+                    })
+                    this.buttonDiv.appendChild(this.statsButton)
+
+                    // Close stream
+                    this.exitStreamButton.innerText = I.stream.exit
+                    this.exitStreamButton.addEventListener("click", async () => {
+                        const stream = this.app.getStream()
+                        if (stream) {
+                            const success = await stream.stop()
+                            if (!success) {
+                                console.debug("Failed to close stream correctly")
+                            }
+                        }
+
+                        if (window.matchMedia('(display-mode: standalone)').matches) {
+                            history.back()
+                        } else {
+                            window.close()
+                        }
+                    })
+                    this.buttonDiv.appendChild(this.exitStreamButton)
+
+                    // Select Mouse Mode
+                    this.mouseMode = new SelectComponent("mouseMode", [
+                        { value: "relative", name: I.stream.relative },
+                        { value: "follow", name: I.stream.follow },
+                        { value: "localCursor", name: I.stream.localCursor },
+                        { value: "pointAndDrag", name: I.stream.pointAndDrag }
+                    ], {
+                        displayName: I.stream.mouseMode,
+                        preSelectedOption: this.app.getInputConfig().mouseMode
+                    })
+                    this.mouseMode.addChangeListener(this.onMouseModeChange.bind(this))
+                    this.mouseMode.mount(this.div)
+
+                    // Select Touch Mode
+                    this.touchMode = new SelectComponent("touchMode", [
+                        { value: "touch", name: I.stream.touch },
+                        { value: "mouseRelative", name: I.stream.relative },
+                        { value: "localCursor", name: I.stream.localCursor },
+                        { value: "pointAndDrag", name: I.stream.pointAndDrag }
+                    ], {
+                        displayName: I.stream.touchMode,
+                        preSelectedOption: this.app.getInputConfig().touchMode
+                    })
+                    this.touchMode.addChangeListener(this.onTouchModeChange.bind(this))
+                    this.touchMode.mount(this.div)
+
                 }
-            }, 500);
-        });
 
-        const cancelKbdTimer = () => {
-            clearTimeout(kbdPressTimer);
-        };
-        this.keyboardButton.addEventListener("pointerup", cancelKbdTimer);
-        this.keyboardButton.addEventListener("pointercancel", cancelKbdTimer);
-        this.keyboardButton.addEventListener("pointerleave", cancelKbdTimer);
-
-        this.keyboardButton.addEventListener("contextmenu", (e) => {
-            e.preventDefault();
-        });
-
-        this.keyboardButton.addEventListener("click", async (e) => {
-            if (kbdIsLongPress) {
-                e.preventDefault();
-                e.stopPropagation();
-                return;
-            }
-
-            setSidebarExtended(false);
-            this.screenKeyboard.show();
-        });
-
-        this.buttonDiv.appendChild(this.keyboardButton);
-
-        // --- Floating Keyboard Button ---
-        this.floatingKeyboardButton.innerText = "⌨×";
-        this.floatingKeyboardButton.title = I.stream.hideKeyboard;
-        this.floatingKeyboardButton.ariaLabel = I.stream.hideKeyboard;
-        this.floatingKeyboardButton.classList.add("stream-keyboard-floating-button");
-        this.floatingKeyboardButton.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            this.screenKeyboard.hide();
-
-            if (visualKbdOverlay) {
-                this.resetStickyModifiers();
-                visualKbdOverlay.style.display = "none";
-                visualKbdOverlay.style.pointerEvents = "none";
-            }
-        });
-        stopPropagationOn(this.floatingKeyboardButton);
-
-        // --- Standard Keyboard Listeners ---
-        this.screenKeyboard.addKeyDownListener(this.onKeyDown.bind(this));
-        this.screenKeyboard.addKeyUpListener(this.onKeyUp.bind(this));
-        this.screenKeyboard.addTextListener(this.onText.bind(this));
-        this.screenKeyboard.addKeyboardModeWillChangeListener(this.app.onScreenKeyboardModeWillChange.bind(this.app));
-        this.screenKeyboard.addKeyboardModeListener(this.onKeyboardModeChange.bind(this));
-        this.div.appendChild(this.screenKeyboard.getHiddenElement());
-
-
-        // Fullscreen
-        this.fullscreenButton.innerText = I.stream.fullscreen
-        this.fullscreenButton.addEventListener("click", async () => {
-            if (this.app.isFullscreen()) {
-                this.app.markManualFullscreenExitRequested()
-                await this.app.exitFullscreen()
-            } else {
-                await this.app.requestFullscreen()
-            }
-        })
-        this.buttonDiv.appendChild(this.fullscreenButton)
-
-        // Stats
-        this.statsButton.innerText = I.stream.stats
-        this.statsButton.addEventListener("click", () => {
-            const stats = this.app.getStream()?.getStats()
-            if (stats) {
-                stats.toggle()
-            }
-        })
-        this.buttonDiv.appendChild(this.statsButton)
-
-        // Close stream
-        this.exitStreamButton.innerText = I.stream.exit
-        this.exitStreamButton.addEventListener("click", async () => {
-            const stream = this.app.getStream()
-            if (stream) {
-                const success = await stream.stop()
-                if (!success) {
-                    console.debug("Failed to close stream correctly")
+                onCapabilitiesChange(capabilities: StreamCapabilities) {
+                    this.touchMode.setOptionEnabled("touch", capabilities.touch)
                 }
-            }
 
-            if (window.matchMedia('(display-mode: standalone)').matches) {
-                history.back()
-            } else {
-                window.close()
-            }
-        })
-        this.buttonDiv.appendChild(this.exitStreamButton)
+                getScreenKeyboard(): ScreenKeyboard {
+                    return this.screenKeyboard
+                }
 
-        // Select Mouse Mode
-        this.mouseMode = new SelectComponent("mouseMode", [
-            { value: "relative", name: I.stream.relative },
-            { value: "follow", name: I.stream.follow },
-            { value: "localCursor", name: I.stream.localCursor },
-            { value: "pointAndDrag", name: I.stream.pointAndDrag }
-        ], {
-            displayName: I.stream.mouseMode,
-            preSelectedOption: this.app.getInputConfig().mouseMode
-        })
-        this.mouseMode.addChangeListener(this.onMouseModeChange.bind(this))
-        this.mouseMode.mount(this.div)
+                // -- Keyboard
+                private onText(event: TextEvent) {
+                    this.app.getStream()?.getInput().sendText(event.detail.text)
+                }
+                private onKeyDown(event: KeyboardEvent) {
+                    this.app.getStream()?.getInput().onKeyDown(event)
+                }
+                private onKeyUp(event: KeyboardEvent) {
+                    this.app.getStream()?.getInput().onKeyUp(event)
+                }
+                private onKeyboardModeChange(event: KeyboardModeEvent) {
+                    if (event.detail.enabled) {
+                        this.floatingKeyboardButton.classList.add("visible")
+                    } else {
+                        this.floatingKeyboardButton.classList.remove("visible")
+                        this.app.resetKeyboardViewportVideoOffset()
+                    }
+                }
 
-        // Select Touch Mode
-        this.touchMode = new SelectComponent("touchMode", [
-            { value: "touch", name: I.stream.touch },
-            { value: "mouseRelative", name: I.stream.relative },
-            { value: "localCursor", name: I.stream.localCursor },
-            { value: "pointAndDrag", name: I.stream.pointAndDrag }
-        ], {
-            displayName: I.stream.touchMode,
-            preSelectedOption: this.app.getInputConfig().touchMode
-        })
-        this.touchMode.addChangeListener(this.onTouchModeChange.bind(this))
-        this.touchMode.mount(this.div)
+                // -- Mouse Mode
+                private onMouseModeChange() {
+                    const config = this.app.getInputConfig()
+                    config.mouseMode = this.mouseMode.getValue() as any
+                    this.app.setInputConfig(config)
+                }
 
-        // -- Virtual Gamepad Configuration --
-        const editBtn = document.createElement("button");
-        editBtn.innerText = "Edit Gamepad Layout";
-        editBtn.style.padding = "8px 16px";
-        editBtn.style.background = "#4CAF50";
-        editBtn.style.color = "white";
-        editBtn.style.border = "none";
-        editBtn.style.borderRadius = "4px";
-        editBtn.style.marginTop = "15px";
-        editBtn.style.cursor = "pointer";
-        editBtn.style.fontWeight = "bold";
-        editBtn.style.width = "100%";
-        editBtn.onclick = () => {
-            if ((window as any).toggleGamepadEditMode) {
-                (window as any).toggleGamepadEditMode(true);
-            }
-        };
-        this.div.appendChild(editBtn);
+                // -- Touch Mode
+                private onTouchModeChange() {
+                    const config = this.app.getInputConfig()
+                    config.touchMode = this.touchMode.getValue() as any
+                    this.app.setInputConfig(config)
+                }
 
-        const opacitySlider = new InputComponent("vpad-opacity", "number", "Gamepad Opacity", {
-            numberSlider: { range_min: 0.1, range_max: 1.0 },
-            step: "0.1",
-            value: "1.0"
-        });
-        opacitySlider.addChangeListener(() => {
-            const overlay = document.getElementById('controller-overlay');
-            if (overlay) overlay.style.setProperty('--vpad-opacity', opacitySlider.getValue());
-        });
-        opacitySlider.mount(this.div);
-    }
+                // --- Move Monitors ---
+                private sendMonitorShortcut(vkCode: number) {
+                    const input = this.app.getStream()?.getInput();
+                    if (!input) return;
 
-    onCapabilitiesChange(capabilities: StreamCapabilities) {
-        this.touchMode.setOptionEnabled("touch", capabilities.touch)
-    }
+                    const modifiers = [0x11, 0x12, 0x10];
 
-    getScreenKeyboard(): ScreenKeyboard {
-        return this.screenKeyboard
-    }
+                    modifiers.forEach(key => input.sendKey(true, key, 0));
+                    input.sendKey(true, vkCode, 0);
+                    input.sendKey(false, vkCode, 0);
+                    modifiers.forEach(key => input.sendKey(false, key, 0));
+                }
 
-    // -- Keyboard
-    private onText(event: TextEvent) {
-        this.app.getStream()?.getInput().sendText(event.detail.text)
-    }
-    private onKeyDown(event: KeyboardEvent) {
-        this.app.getStream()?.getInput().onKeyDown(event)
-    }
-    private onKeyUp(event: KeyboardEvent) {
-        this.app.getStream()?.getInput().onKeyUp(event)
-    }
-    private onKeyboardModeChange(event: KeyboardModeEvent) {
-        if (event.detail.enabled) {
-            this.floatingKeyboardButton.classList.add("visible")
-        } else {
-            this.floatingKeyboardButton.classList.remove("visible")
-            this.app.resetKeyboardViewportVideoOffset()
-        }
-    }
+                extended(): void {
 
-    // -- Mouse Mode
-    private onMouseModeChange() {
-        const config = this.app.getInputConfig()
-        config.mouseMode = this.mouseMode.getValue() as any
-        this.app.setInputConfig(config)
-    }
+                }
+                unextend(): void {
 
-    // -- Touch Mode
-    private onTouchModeChange() {
-        const config = this.app.getInputConfig()
-        config.touchMode = this.touchMode.getValue() as any
-        this.app.setInputConfig(config)
-    }
+                }
 
-    // --- Move Monitors ---
-    private sendMonitorShortcut(vkCode: number) {
-        const input = this.app.getStream()?.getInput();
-        if (!input) return;
-
-        const modifiers = [0x11, 0x12, 0x10];
-
-        modifiers.forEach(key => input.sendKey(true, key, 0));
-        input.sendKey(true, vkCode, 0);
-        input.sendKey(false, vkCode, 0);
-        modifiers.forEach(key => input.sendKey(false, key, 0));
-    }
-
-    extended(): void {
-
-    }
-    unextend(): void {
-
-    }
-
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.div)
-        const appRoot = document.getElementById("root")
-        ;(appRoot ?? document.body).appendChild(this.floatingKeyboardButton)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.div)
-        if (this.floatingKeyboardButton.parentElement) {
-            this.floatingKeyboardButton.parentElement.removeChild(this.floatingKeyboardButton)
-        }
-    }
+                mount(parent: HTMLElement): void {
+                    parent.appendChild(this.div)
+                    const appRoot = document.getElementById("root")
+                    ;(appRoot ?? document.body).appendChild(this.floatingKeyboardButton)
+                }
+                unmount(parent: HTMLElement): void {
+                    parent.removeChild(this.div)
+                    if (this.floatingKeyboardButton.parentElement) {
+                        this.floatingKeyboardButton.parentElement.removeChild(this.floatingKeyboardButton)
+                    }
+                }
 }
 
 class SendKeycodeModal extends FormModal<number> {
 
     private dropdownSearch: SelectComponent
 
-    constructor() {
-        super()
+        constructor() {
+            super()
 
-        const keyList = []
-        for (const keyNameRaw in StreamKeys) {
-            const keyName = keyNameRaw as keyof typeof StreamKeys
-            const keyValue = StreamKeys[keyName]
+            const keyList = []
+            for (const keyNameRaw in StreamKeys) {
+                const keyName = keyNameRaw as keyof typeof StreamKeys
+                const keyValue = StreamKeys[keyName]
 
-            const PREFIX = "VK_"
+                const PREFIX = "VK_"
 
-            let name: string = keyName
-            if (name.startsWith(PREFIX)) {
-                name = name.slice(PREFIX.length)
+                let name: string = keyName
+                if (name.startsWith(PREFIX)) {
+                    name = name.slice(PREFIX.length)
+                }
+
+                keyList.push({
+                    value: keyValue.toString(),
+                             name
+                })
             }
 
-            keyList.push({
-                value: keyValue.toString(),
-                name
+            this.dropdownSearch = new SelectComponent("winKeycode", keyList, {
+                hasSearch: true,
+                displayName: I.stream.selectKeycode
             })
         }
 
-        this.dropdownSearch = new SelectComponent("winKeycode", keyList, {
-            hasSearch: true,
-            displayName: I.stream.selectKeycode
-        })
-    }
-
-    mountForm(form: HTMLFormElement): void {
-        this.dropdownSearch.mount(form)
-    }
-
-
-    reset(): void {
-        this.dropdownSearch.reset()
-    }
-
-    submit(): number | null {
-        const keyString = this.dropdownSearch.getValue()
-        if (keyString == null) {
-            return null
+        mountForm(form: HTMLFormElement): void {
+            this.dropdownSearch.mount(form)
         }
 
-        return parseInt(keyString)
-    }
+
+        reset(): void {
+            this.dropdownSearch.reset()
+        }
+
+        submit(): number | null {
+            const keyString = this.dropdownSearch.getValue()
+            if (keyString == null) {
+                return null
+            }
+
+            return parseInt(keyString)
+        }
 }
 
 class ClipboardModal implements Modal<string | null> {
@@ -1625,8 +1736,8 @@ class ClipboardModal implements Modal<string | null> {
         this.title.style.marginBottom = "10px"
 
         this.description.innerText = incomingText
-            ? "Text received from Host PC:"
-            : "Paste text below to send it to the Host PC:"
+        ? "Text received from Host PC:"
+        : "Paste text below to send it to the Host PC:"
         this.description.style.fontSize = "14px"
         this.description.style.opacity = "0.8"
         this.description.style.marginBottom = "10px"
