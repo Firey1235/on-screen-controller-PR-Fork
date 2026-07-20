@@ -1097,6 +1097,16 @@ class ViewerSidebar implements Component, Sidebar {
                     this.buttonDiv.classList.add("sidebar-stream-buttons")
                     this.div.appendChild(this.buttonDiv)
 
+                    const switchLeftButton = document.createElement("button");
+                    switchLeftButton.innerText = "Prev Monitor";
+                    switchLeftButton.addEventListener("click", () => this.sendMonitorShortcut(0x70)); // VK_F1
+                    this.buttonDiv.appendChild(switchLeftButton);
+
+                    const switchRightButton = document.createElement("button");
+                    switchRightButton.innerText = "Next Monitor";
+                    switchRightButton.addEventListener("click", () => this.sendMonitorShortcut(0x71)); // VK_F2
+                    this.buttonDiv.appendChild(switchRightButton);
+
                     // --- VIRTUAL GAMEPAD BUTTON (First button) ---
                     this.gamepadMenu.classList.add("sidebar-gamepad-menu");
                     Object.assign(this.gamepadMenu.style, {
@@ -1199,7 +1209,7 @@ class ViewerSidebar implements Component, Sidebar {
                     });
                     this.gamepadMenu.appendChild(hapticsButton);
 
-                    const motionButton = makeMenuButton("Motion: On");
+                    const motionButton = makeMenuButton("Motion: Off");
                     motionButton.addEventListener("click", () => {
                         this.motionEnabled = !this.motionEnabled;
                         motionButton.innerText = this.motionEnabled ? "Motion: On" : "Motion: Off";
@@ -1676,7 +1686,7 @@ class SendKeycodeModal extends FormModal<number> {
 
                 const PREFIX = "VK_"
 
-                let name: string = keyName
+                let name: string = keyName as string
                 if (name.startsWith(PREFIX)) {
                     name = name.slice(PREFIX.length)
                 }
