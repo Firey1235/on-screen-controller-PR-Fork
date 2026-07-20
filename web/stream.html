@@ -774,8 +774,9 @@
                 overlay.classList.add('active'); // Force display
             } else {
                 menu.style.display = 'none';
+                overlay.classList.remove('active');
                 if (!window.vGamepad || !window.vGamepad.connected) {
-                    overlay.classList.remove('active');
+                    overlay.style.display = 'none';
                 }
                 document.querySelectorAll('.btn-round, .joystick-zone, .dpad-zone, .btn-rect').forEach(el => {
                     el.style.border = '';
@@ -828,6 +829,53 @@
                 saveBtn.addEventListener('touchend', triggerSaveExit);
                 saveBtn.addEventListener('mouseup', triggerSaveExit);
             }
+
+            // Draggable Menu
+            const editMenu = document.getElementById('edit-layout-menu');
+            let isDraggingMenu = false;
+            let menuOffsetX, menuOffsetY;
+
+            const startDragMenu = (clientX, clientY) => {
+                isDraggingMenu = true;
+                const rect = editMenu.getBoundingClientRect();
+                menuOffsetX = clientX - rect.left;
+                menuOffsetY = clientY - rect.top;
+                editMenu.style.left = rect.left + 'px';
+                editMenu.style.top = rect.top + 'px';
+                editMenu.style.transform = 'none';
+                editMenu.style.right = 'auto';
+                editMenu.style.bottom = 'auto';
+            };
+
+            const dragMenu = (clientX, clientY) => {
+                if (!isDraggingMenu) return;
+                editMenu.style.left = (clientX - menuOffsetX) + 'px';
+                editMenu.style.top = (clientY - menuOffsetY) + 'px';
+            };
+
+            const stopDragMenu = () => {
+                isDraggingMenu = false;
+            };
+
+            editMenu.addEventListener('mousedown', (e) => {
+                if (e.target.id === 'edit-size-slider' || e.target.id === 'edit-save-btn') return;
+                startDragMenu(e.clientX, e.clientY);
+            });
+            document.addEventListener('mousemove', (e) => dragMenu(e.clientX, e.clientY));
+            document.addEventListener('mouseup', stopDragMenu);
+
+            editMenu.addEventListener('touchstart', (e) => {
+                if (e.target.id === 'edit-size-slider' || e.target.id === 'edit-save-btn') return;
+                const touch = e.touches[0];
+                startDragMenu(touch.clientX, touch.clientY);
+            }, { passive: false });
+            document.addEventListener('touchmove', (e) => {
+                if (!isDraggingMenu) return;
+                e.preventDefault();
+                const touch = e.touches[0];
+                dragMenu(touch.clientX, touch.clientY);
+            }, { passive: false });
+            document.addEventListener('touchend', stopDragMenu);
         });
 
     </script>
